@@ -35,7 +35,7 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 import io
 import stmol
-import py3dmol
+import py3Dmol
 import warnings
 warnings.filterwarnings("ignore")
 
