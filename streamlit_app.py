@@ -35,8 +35,6 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 import io
 import warnings
-import pybaselines
-
 warnings.filterwarnings("ignore")
 
 # Try to import pybaselines (recommended for high-quality baseline methods)
@@ -842,9 +840,9 @@ if mp_api_key:
                 show_3d = st.checkbox("🧊 Show interactive 3D crystal structure (ball & stick + unit cell)", value=False)
                 if show_3d:
                     try:
-                        xyz_str = struct.to(fmt="xyz")
+                        cif_str = struct.to(fmt="cif")
                         xyz_view = py3Dmol.view(width=720, height=480)
-                        xyz_view.addModel(xyz_str, "xyz")
+                        xyz_view.addModel(cif_str, "cif")
                         xyz_view.setStyle({
                             'sphere': {'colorscheme': 'Jmol', 'scale': 0.32},
                             'stick': {'colorscheme': 'Jmol', 'radius': 0.10}
@@ -959,9 +957,9 @@ if cif_file is not None:
         if HAS_3DMOL:
             if st.checkbox("Show 3D structure", value=True, key="standalone_3d"):
                 try:
-                    xyz_str = struct.to(fmt="xyz")
+                    cif_str = struct.to(fmt="cif")
                     view = py3Dmol.view(width=700, height=450)
-                    view.addModel(xyz_str, "xyz")
+                    view.addModel(cif_str, "cif")
                     view.setStyle({
                         'sphere': {'colorscheme': 'Jmol', 'scale': 0.32},
                         'stick': {'colorscheme': 'Jmol', 'radius': 0.10}
