@@ -1,9 +1,10 @@
-
-streamlit as st
-pandas as pd
+streamlit
+pandas
 numpy
 plotly
 scipy
 scipy
 io
 warnings
+stmol
+py3Dmol

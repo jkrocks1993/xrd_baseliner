@@ -683,7 +683,7 @@ if mp_api_key:
                         elements=elements,
                         fields=[
                             "material_id", "formula_pretty", "chemsys",
-                            "crystal_system", "spacegroup_symbol", "nsites", "density"
+                            "symmetry", "nsites", "density"
                         ],
                         chunk_size=max_cands
                     )
@@ -700,11 +700,16 @@ if mp_api_key:
             # Display candidates nicely
             cand_rows = []
             for doc in docs:
+                # Extract symmetry info safely (crystal_system and spacegroup are inside .symmetry)
+                sym = getattr(doc, "symmetry", None)
+                crystal_sys = getattr(sym, "crystal_system", "N/A") if sym else "N/A"
+                space_group = getattr(sym, "symbol", "N/A") if sym else "N/A"
+
                 cand_rows.append({
                     "ID": doc.material_id,
                     "Formula": getattr(doc, "formula_pretty", "N/A"),
-                    "Crystal System": getattr(doc, "crystal_system", "N/A"),
-                    "Space Group": getattr(doc, "spacegroup_symbol", "N/A"),
+                    "Crystal System": crystal_sys,
+                    "Space Group": space_group,
                     "# Atoms": getattr(doc, "nsites", "?"),
                     "Density": round(getattr(doc, "density", 0), 2) if getattr(doc, "density", None) else "—"
                 })
@@ -765,11 +770,233 @@ if mp_api_key:
                         st.warning("No close matches found with current tolerance. Try increasing the tolerance or check if this phase is realistic for your sample.")
                     
                     # Bonus: show some crystal info
-                    st.info(f"**{structure.composition.reduced_formula}** — {structure.get_space_group_info()[1]} ({structure.get_crystal_system()})")
+                    try:
+                        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+                        sga = SpacegroupAnalyzer(structure)
+                        crystal_sys = sga.get_crystal_system()
+                    except:
+                        crystal_sys = "N/A"
+                    st.info(f"**{structure.composition.reduced_formula}** — {structure.get_space_group_info()[1]} ({crystal_sys})")
+
+                    # Persist for 3D visualization and enhanced matching
+                    st.session_state["last_structure"] = structure
+                    st.session_state["last_theo_pattern"] = theo_pattern
+                    st.session_state["last_mp_id"] = selected_mp_id
+
+                    # Offer CIF download
+                    try:
+                        cif_content = structure.to(fmt="cif")
+                        st.download_button(
+                            label="⬇️ Download CIF file",
+                            data=cif_content,
+                            file_name=f"{structure.composition.reduced_formula.replace(' ', '')}.cif",
+                            mime="chemical/x-cif",
+                            help="Download the crystal structure as a CIF file. You can open it in VESTA, Mercury, or upload it to the Crystal Structure Viewer below."
+                        )
+                    except Exception as cif_err:
+                        st.caption(f"Could not generate CIF: {cif_err}")
 
                 except Exception as e:
                     st.error(f"Failed to fetch/simulate structure: {e}")
+
+        # ====================== 3D CRYSTAL STRUCTURE + d-SPACING / (hkl) VISUALIZATION ======================
+        if "last_structure" in st.session_state:
+            st.divider()
+            st.subheader("🧊 3D Interactive Crystal Structure + Plane Visualization")
+
+            struct = st.session_state["last_structure"]
+            theo_pat = st.session_state.get("last_theo_pattern", None)
+
+            # Crystal info summary
+            col_info1, col_info2, col_info3 = st.columns(3)
+            with col_info1:
+                st.metric("Formula", struct.composition.reduced_formula)
+            with col_info2:
+                sg_info = struct.get_space_group_info()
+                st.metric("Space Group", sg_info[1])
+            with col_info3:
+                try:
+                    from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+                    sga = SpacegroupAnalyzer(struct)
+                    crystal_sys = sga.get_crystal_system()
+                except:
+                    crystal_sys = "N/A"
+                st.metric("Crystal System", crystal_sys)
+
+            # Lattice parameters
+            lattice = struct.lattice
+            st.caption(f"**Lattice parameters:** a = {lattice.a:.4f} Å | b = {lattice.b:.4f} Å | c = {lattice.c:.4f} Å  |  "
+                       f"α = {lattice.alpha:.1f}° β = {lattice.beta:.1f}° γ = {lattice.gamma:.1f}°  |  Volume = {lattice.volume:.2f} Å³")
+
+            # 3D Viewer
+            try:
+                from stmol import showmol
+                import py3Dmol
+                HAS_3DMOL = True
+            except ImportError:
+                HAS_3DMOL = False
+
+            if HAS_3DMOL:
+                show_3d = st.checkbox("🧊 Show interactive 3D crystal structure (ball & stick + unit cell)", value=False)
+                if show_3d:
+                    try:
+                        xyz_str = struct.to(fmt="xyz")
+                        xyz_view = py3Dmol.view(width=720, height=480)
+                        xyz_view.addModel(xyz_str, "xyz")
+                        xyz_view.setStyle({
+                            'sphere': {'colorscheme': 'Jmol', 'scale': 0.32},
+                            'stick': {'colorscheme': 'Jmol', 'radius': 0.10}
+                        })
+                        xyz_view.addUnitCell()
+                        xyz_view.zoomTo()
+                        xyz_view.setBackgroundColor('#ffffff')
+                        showmol(xyz_view, height=480, width=720)
+                        st.caption("Drag to rotate • Scroll/pinch to zoom • The box shows the unit cell. This is the atomic arrangement that produces your XRD peaks.")
+                    except Exception as viz_err:
+                        st.error(f"3D view error: {viz_err}")
+            else:
+                st.info("For beautiful interactive 3D crystal visualization, install: `pip install stmol py3Dmol`")
+
+            # Enhanced table: d-spacing + (hkl) faces for matched peaks
+            if theo_pat is not None and len(peaks_df) > 0:
+                st.markdown("**Your experimental peaks matched to crystal planes (hkl) and d-spacings**")
+
+                exp_2thetas = peaks_df["2θ (°)"].values
+                theo_2theta = np.array(theo_pat.x)
+                theo_intensity = np.array(theo_pat.y)
+                theo_hkls = getattr(theo_pat, 'hkls', [[]] * len(theo_2theta))
+
+                enhanced = []
+                tol = 0.15
+                for exp_th in exp_2thetas:
+                    diffs = np.abs(theo_2theta - exp_th)
+                    if diffs.min() <= tol:
+                        idx = np.argmin(diffs)
+                        hkl_data = theo_hkls[idx] if idx < len(theo_hkls) else []
+                        hkl_str = str(hkl_data[0].get('hkl', '—')) if hkl_data and len(hkl_data) > 0 else "—"
+
+                        try:
+                            d_val = lattice.d_hkl(hkl_data[0]['hkl']) if hkl_data and len(hkl_data) > 0 else None
+                        except:
+                            d_val = peaks_df.loc[np.isclose(peaks_df["2θ (°)"], exp_th, atol=0.01), "d-spacing (Å)"].values
+                            d_val = d_val[0] if len(d_val) > 0 else None
+
+                        enhanced.append({
+                            "Exp 2θ (°)": round(exp_th, 4),
+                            "Theo 2θ (°)": round(theo_2theta[idx], 4),
+                            "Δ°": round(diffs.min(), 3),
+                            "(hkl) plane": hkl_str,
+                            "d-spacing (Å)": round(d_val, 4) if d_val else "—",
+                            "Intensity (theo)": round(theo_intensity[idx], 1)
+                        })
+
+                if enhanced:
+                    st.dataframe(pd.DataFrame(enhanced), use_container_width=True, hide_index=True)
+                    st.caption("Each matched peak corresponds to diffraction from a specific set of crystal planes (hkl). The d-spacing is the interplanar distance.")
+                else:
+                    st.caption("No (hkl) details available at current tolerance.")
+
 else:
     st.info("Enter a free Materials Project API key above to unlock automated phase identification against real crystal structures.")
 
-st.caption("Built with ❤️ for researchers • Streamlit + pybaselines + Plotly + pymatgen (optional) • Feedback welcome!")
+# ====================== STANDALONE CRYSTAL STRUCTURE VIEWER ======================
+st.divider()
+st.header("🧊 Crystal Structure Viewer")
+
+st.markdown("""
+Upload a `.cif` file to visualize any crystal structure in 3D.  
+This works independently of the Materials Project phase identification.
+""")
+
+cif_file = st.file_uploader("Upload CIF file", type=["cif"], key="cif_viewer")
+
+if cif_file is not None:
+    try:
+        from pymatgen.core import Structure
+        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+        import tempfile
+        import os
+
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".cif") as tmp:
+            tmp.write(cif_file.getvalue())
+            tmp_path = tmp.name
+
+        struct = Structure.from_file(tmp_path)
+        os.unlink(tmp_path)  # clean up
+
+        # Basic info
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Formula", struct.composition.reduced_formula)
+        with col2:
+            sg_info = struct.get_space_group_info()
+            st.metric("Space Group", sg_info[1])
+        with col3:
+            try:
+                sga = SpacegroupAnalyzer(struct)
+                crystal_sys = sga.get_crystal_system()
+            except:
+                crystal_sys = "N/A"
+            st.metric("Crystal System", crystal_sys)
+
+        # Lattice
+        lattice = struct.lattice
+        st.caption(f"a = {lattice.a:.4f} Å, b = {lattice.b:.4f} Å, c = {lattice.c:.4f} Å | "
+                   f"α = {lattice.alpha:.1f}°, β = {lattice.beta:.1f}°, γ = {lattice.gamma:.1f}° | "
+                   f"Volume = {lattice.volume:.2f} Å³")
+
+        # 3D Viewer
+        try:
+            from stmol import showmol
+            import py3Dmol
+            HAS_3DMOL = True
+        except ImportError:
+            HAS_3DMOL = False
+
+        if HAS_3DMOL:
+            if st.checkbox("Show 3D structure", value=True, key="standalone_3d"):
+                try:
+                    xyz_str = struct.to(fmt="xyz")
+                    view = py3Dmol.view(width=700, height=450)
+                    view.addModel(xyz_str, "xyz")
+                    view.setStyle({
+                        'sphere': {'colorscheme': 'Jmol', 'scale': 0.32},
+                        'stick': {'colorscheme': 'Jmol', 'radius': 0.10}
+                    })
+                    view.addUnitCell()
+                    view.zoomTo()
+                    view.setBackgroundColor('#ffffff')
+                    showmol(view, height=450, width=700)
+                    st.caption("Interactive 3D view • Drag to rotate • Scroll to zoom")
+                except Exception as e:
+                    st.error(f"Failed to render 3D view: {e}")
+        else:
+            st.warning("Please install `stmol` and `py3Dmol` to enable 3D visualization.")
+
+        # Optional: Show some low-index planes
+        if st.checkbox("Show example (hkl) planes & d-spacings"):
+            try:
+                sga = SpacegroupAnalyzer(struct)
+                # Get a few low index planes
+                planes = [(1,0,0), (0,1,0), (0,0,1), (1,1,0), (1,0,1), (0,1,1), (1,1,1)]
+                plane_data = []
+                for hkl in planes:
+                    try:
+                        d = lattice.d_hkl(hkl)
+                        plane_data.append({
+                            "(hkl)": str(hkl),
+                            "d-spacing (Å)": round(d, 4)
+                        })
+                    except:
+                        pass
+                if plane_data:
+                    st.dataframe(pd.DataFrame(plane_data), use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.caption(f"Could not calculate planes: {e}")
+
+    except Exception as e:
+        st.error(f"Failed to read CIF file: {e}")
+        st.info("Make sure the file is a valid CIF format.")
+
+st.caption("Built with ❤️ for researchers • Streamlit + pybaselines + Plotly + pymatgen + stmol (optional) • Feedback welcome!")
