@@ -1,1 +1,9 @@
-streamlit
+
+streamlit as st
+pandas as pd
+numpy
+plotly
+scipy
+scipy
+io
+warnings
