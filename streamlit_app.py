@@ -35,6 +35,8 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 import io
 import warnings
+import pybaseline
+
 warnings.filterwarnings("ignore")
 
 # Try to import pybaselines (recommended for high-quality baseline methods)
