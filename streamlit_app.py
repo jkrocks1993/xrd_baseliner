@@ -34,6 +34,8 @@ from scipy.signal import find_peaks, savgol_filter, detrend
 from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 import io
+import stmol
+import py3dmol
 import warnings
 warnings.filterwarnings("ignore")
 
