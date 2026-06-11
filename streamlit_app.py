@@ -17,7 +17,7 @@ Features:
 - Demo data generator for testing
 
 Installation (run once):
-    pip install streamlit pandas numpy scipy plotly pybaselines
+    pip install streamlit pandas numpy scipy plotly pybaselines pymatgen mp-api
 
 Run:
     streamlit run xrd_analyzer.py
@@ -34,8 +34,6 @@ from scipy.signal import find_peaks, savgol_filter, detrend
 from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 import io
-import stmol
-import py3Dmol
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -45,6 +43,122 @@ try:
     HAS_PYBASELINES = True
 except ImportError:
     HAS_PYBASELINES = False
+
+
+# ====================== 3D CRYSTAL VISUALIZATION (Plotly) ======================
+ELEMENT_COLORS = {
+    'H': '#FFFFFF', 'He': '#D9FFFF', 'Li': '#CC80FF', 'Be': '#C2FF00',
+    'B': '#FFB5B5', 'C': '#909090', 'N': '#3050F8', 'O': '#FF0D0D',
+    'F': '#90E050', 'Ne': '#B3E3F5', 'Na': '#AB5CF2', 'Mg': '#8AFF00',
+    'Al': '#BFA6A6', 'Si': '#F0C8A0', 'P': '#FF8000', 'S': '#FFFF30',
+    'Cl': '#1FF01F', 'Ar': '#80D1E3', 'K': '#8F40D4', 'Ca': '#3DFF00',
+    'Sc': '#E6E6E6', 'Ti': '#BFC2C7', 'V': '#A6A6AB', 'Cr': '#8A99C7',
+    'Mn': '#9C7AC7', 'Fe': '#E06633', 'Co': '#F090A0', 'Ni': '#50D050',
+    'Cu': '#C88033', 'Zn': '#7D80B0', 'Ga': '#C28F8F', 'Ge': '#668F8F',
+    'As': '#BD80E3', 'Se': '#FFA100', 'Br': '#A62929', 'Kr': '#5CB8D1',
+    'Rb': '#702EB0', 'Sr': '#00FF00', 'Y': '#94FFFF', 'Zr': '#94E0E0',
+    'Nb': '#73C2C9', 'Mo': '#54B5B5', 'Tc': '#3B9E9E', 'Ru': '#248F8F',
+    'Rh': '#0A7D8C', 'Pd': '#006985', 'Ag': '#C0C0C0', 'Cd': '#FFD98F',
+    'In': '#A67573', 'Sn': '#668080', 'Sb': '#9E63B5', 'Te': '#D47A00',
+    'I': '#940094', 'Xe': '#429EB2', 'Cs': '#57178F', 'Ba': '#00C900',
+    'La': '#70D4FF', 'Ce': '#FFFFC7', 'Pr': '#D9FFC7', 'Nd': '#C7FFC7',
+    'Pm': '#A3FFC7', 'Sm': '#8FFFC7', 'Eu': '#61FFC7', 'Gd': '#45FFC7',
+    'Tb': '#30FFC7', 'Dy': '#1FFFC7', 'Ho': '#00FF9C', 'Er': '#00E675',
+    'Tm': '#00D452', 'Yb': '#00BF38', 'Lu': '#00AB24', 'Hf': '#4DC2FF',
+    'Ta': '#4DA6FF', 'W': '#2194D6', 'Re': '#267DAB', 'Os': '#266696',
+    'Ir': '#175487', 'Pt': '#D0D0E0', 'Au': '#FFD123', 'Hg': '#B8B8D0',
+    'Tl': '#A6544D', 'Pb': '#575961', 'Bi': '#9E4FB5', 'Po': '#AB5C00',
+    'At': '#754F45', 'Rn': '#428296', 'Fr': '#420066', 'Ra': '#007D00',
+    'Ac': '#70ABFA', 'Th': '#00BAFF', 'Pa': '#00A1FF', 'U': '#008FFF',
+    'Np': '#0080FF', 'Pu': '#006BFF', 'Am': '#545CF2', 'Cm': '#785CE3',
+    'Bk': '#8A4FE3', 'Cf': '#A136D4', 'Es': '#B31FD4', 'Fm': '#B31FBA',
+}
+
+def get_element_color(element):
+    return ELEMENT_COLORS.get(element, '#CCCCCC')  # Default gray
+
+
+def create_crystal_3d_plot(structure, title="Crystal Structure"):
+    """Create an interactive 3D Plotly visualization of a pymatgen Structure."""
+    if structure is None:
+        return None
+
+    # Get fractional coordinates and convert to cartesian
+    coords = structure.cart_coords
+    elements = [site.specie.symbol for site in structure]
+
+    # Group by element for legend
+    from collections import defaultdict
+    element_groups = defaultdict(list)
+
+    for i, (coord, elem) in enumerate(zip(coords, elements)):
+        element_groups[elem].append(coord)
+
+    fig = go.Figure()
+
+    for elem, positions in element_groups.items():
+        x, y, z = zip(*positions)
+        fig.add_trace(go.Scatter3d(
+            x=x, y=y, z=z,
+            mode='markers',
+            marker=dict(
+                size=8,
+                color=get_element_color(elem),
+                line=dict(width=0.5, color='black')
+            ),
+            name=elem,
+            legendgroup=elem,
+            showlegend=True,
+            hovertemplate=f"<b>{elem}</b><br>x: %{{x:.2f}}<br>y: %{{y:.2f}}<br>z: %{{z:.2f}}<extra></extra>"
+        ))
+
+    # Add unit cell edges (simple box)
+    cell = structure.lattice.matrix
+    origin = np.array([0, 0, 0])
+    vertices = [
+        origin,
+        cell[0],
+        cell[1],
+        cell[2],
+        cell[0] + cell[1],
+        cell[0] + cell[2],
+        cell[1] + cell[2],
+        cell[0] + cell[1] + cell[2]
+    ]
+    edges = [
+        (0,1), (0,2), (0,3),
+        (1,4), (1,5), (2,4), (2,6), (3,5), (3,6),
+        (4,7), (5,7), (6,7)
+    ]
+
+    for start, end in edges:
+        fig.add_trace(go.Scatter3d(
+            x=[vertices[start][0], vertices[end][0]],
+            y=[vertices[start][1], vertices[end][1]],
+            z=[vertices[start][2], vertices[end][2]],
+            mode='lines',
+            line=dict(color='black', width=2),
+            showlegend=False,
+            hoverinfo='skip'
+        ))
+
+    fig.update_layout(
+        title=title,
+        scene=dict(
+            xaxis_title='X (Å)',
+            yaxis_title='Y (Å)',
+            zaxis_title='Z (Å)',
+            aspectmode='data'
+        ),
+        legend_title_text="Elements",
+        height=550,
+        margin=dict(l=0, r=0, b=0, t=40)
+    )
+
+    return fig
+
+
+# ====================== STREAMLIT APP ======================
 
 st.set_page_config(
     page_title="XRD Peak Analyzer",
@@ -830,34 +944,16 @@ if mp_api_key:
             st.caption(f"**Lattice parameters:** a = {lattice.a:.4f} Å | b = {lattice.b:.4f} Å | c = {lattice.c:.4f} Å  |  "
                        f"α = {lattice.alpha:.1f}° β = {lattice.beta:.1f}° γ = {lattice.gamma:.1f}°  |  Volume = {lattice.volume:.2f} Å³")
 
-            # 3D Viewer
-            try:
-                from stmol import showmol
-                import py3Dmol
-                HAS_3DMOL = True
-            except ImportError:
-                HAS_3DMOL = False
-
-            if HAS_3DMOL:
-                show_3d = st.checkbox("🧊 Show interactive 3D crystal structure (ball & stick + unit cell)", value=False)
-                if show_3d:
-                    try:
-                        cif_str = struct.to(fmt="cif")
-                        xyz_view = py3Dmol.view(width=720, height=480)
-                        xyz_view.addModel(cif_str, "cif")
-                        xyz_view.setStyle({
-                            'sphere': {'colorscheme': 'Jmol', 'scale': 0.32},
-                            'stick': {'colorscheme': 'Jmol', 'radius': 0.10}
-                        })
-                        xyz_view.addUnitCell()
-                        xyz_view.zoomTo()
-                        xyz_view.setBackgroundColor('#ffffff')
-                        showmol(xyz_view, height=480, width=720)
-                        st.caption("Drag to rotate • Scroll/pinch to zoom • The box shows the unit cell. This is the atomic arrangement that produces your XRD peaks.")
-                    except Exception as viz_err:
-                        st.error(f"3D view error: {viz_err}")
-            else:
-                st.info("For beautiful interactive 3D crystal visualization, install: `pip install stmol py3Dmol`")
+            # 3D Viewer (Plotly - works on Streamlit Cloud)
+            show_3d = st.checkbox("🧊 Show interactive 3D crystal structure", value=True)
+            if show_3d:
+                try:
+                    fig_3d = create_crystal_3d_plot(struct, title=f"{struct.composition.reduced_formula} - 3D View")
+                    if fig_3d:
+                        st.plotly_chart(fig_3d, use_container_width=True)
+                        st.caption("Interactive 3D view • Drag to rotate • Scroll to zoom • Different colors = different elements (see legend)")
+                except Exception as viz_err:
+                    st.error(f"3D view error: {viz_err}")
 
             # Enhanced table: d-spacing + (hkl) faces for matched peaks
             if theo_pat is not None and len(peaks_df) > 0:
@@ -895,6 +991,64 @@ if mp_api_key:
                 if enhanced:
                     st.dataframe(pd.DataFrame(enhanced), use_container_width=True, hide_index=True)
                     st.caption("Each matched peak corresponds to diffraction from a specific set of crystal planes (hkl). The d-spacing is the interplanar distance.")
+
+                    # === NEW: Auto-show plane on selection ===
+                    if "last_structure" in st.session_state:
+                        struct = st.session_state["last_structure"]
+                        lattice = struct.lattice
+
+                        # Build selectable options from matched planes
+                        plane_options = []
+                        parsed_hkls = []
+                        for row in enhanced:
+                            hkl_str = row["(hkl) plane"]
+                            if hkl_str and hkl_str != "—":
+                                try:
+                                    # Parse common formats like [1, 1, 1] or (1, 1, 0)
+                                    hkl = tuple(int(x) for x in hkl_str.strip("()[]").split(","))
+                                    if len(hkl) == 3:
+                                        label = f"({hkl[0]} {hkl[1]} {hkl[2]})  •  d = {row['d-spacing (Å)']} Å"
+                                        plane_options.append(label)
+                                        parsed_hkls.append(hkl)
+                                except:
+                                    continue
+
+                        if plane_options:
+                            st.markdown("**Visualize matched plane in 3D**")
+                            selected_label = st.selectbox(
+                                "Choose a plane from your matched peaks:",
+                                options=plane_options,
+                                key="plane_selector"
+                            )
+
+                            if st.button("Show Selected Plane in 3D Viewer", key="show_selected_plane"):
+                                try:
+                                    sel_idx = plane_options.index(selected_label)
+                                    h, k, l = parsed_hkls[sel_idx]
+
+                                    plane_points = get_unit_cell_plane_points(h, k, l, lattice)
+
+                                    if len(plane_points) >= 3:
+                                        fig_plane = create_crystal_3d_plot(struct, title=f"{struct.composition.reduced_formula} + ({h} {k} {l}) plane")
+
+                                        x_p = [p[0] for p in plane_points]
+                                        y_p = [p[1] for p in plane_points]
+                                        z_p = [p[2] for p in plane_points]
+
+                                        fig_plane.add_trace(go.Mesh3d(
+                                            x=x_p, y=y_p, z=z_p,
+                                            color='rgba(255, 165, 0, 0.5)',
+                                            opacity=0.6,
+                                            name=f"({h} {k} {l})",
+                                            showlegend=True
+                                        ))
+
+                                        st.plotly_chart(fig_plane, use_container_width=True)
+                                        st.success(f"Showing the ({h} {k} {l}) plane corresponding to the selected matched peak.")
+                                    else:
+                                        st.warning("This plane does not intersect the unit cell well.")
+                                except Exception as draw_err:
+                                    st.error(f"Could not draw the plane: {draw_err}")
                 else:
                     st.caption("No (hkl) details available at current tolerance.")
 
@@ -948,33 +1102,54 @@ if cif_file is not None:
                    f"α = {lattice.alpha:.1f}°, β = {lattice.beta:.1f}°, γ = {lattice.gamma:.1f}° | "
                    f"Volume = {lattice.volume:.2f} Å³")
 
-        # 3D Viewer
-        try:
-            from stmol import showmol
-            import py3Dmol
-            HAS_3DMOL = True
-        except ImportError:
-            HAS_3DMOL = False
+        # 3D Viewer (Plotly)
+        if st.checkbox("Show 3D structure", value=True, key="standalone_3d"):
+            try:
+                fig_3d = create_crystal_3d_plot(struct, title=f"{struct.composition.reduced_formula} - Crystal Structure")
+                if fig_3d:
+                    st.plotly_chart(fig_3d, use_container_width=True)
+                    st.caption("Interactive 3D view • Colors represent different elements (see legend on the right)")
+            except Exception as e:
+                st.error(f"Failed to render 3D view: {e}")
 
-        if HAS_3DMOL:
-            if st.checkbox("Show 3D structure", value=True, key="standalone_3d"):
-                try:
-                    cif_str = struct.to(fmt="cif")
-                    view = py3Dmol.view(width=700, height=450)
-                    view.addModel(cif_str, "cif")
-                    view.setStyle({
-                        'sphere': {'colorscheme': 'Jmol', 'scale': 0.32},
-                        'stick': {'colorscheme': 'Jmol', 'radius': 0.10}
-                    })
-                    view.addUnitCell()
-                    view.zoomTo()
-                    view.setBackgroundColor('#ffffff')
-                    showmol(view, height=450, width=700)
-                    st.caption("Interactive 3D view • Drag to rotate • Scroll to zoom")
-                except Exception as e:
-                    st.error(f"Failed to render 3D view: {e}")
-        else:
-            st.warning("Please install `stmol` and `py3Dmol` to enable 3D visualization.")
+        # Miller Plane Visualizer - helps users understand Miller indices visually
+        st.markdown("### Visualize Specific Crystal Planes (hkl)")
+        st.caption("This tool helps you visualize which crystal planes correspond to Miller indices. Enter h, k, l values and see the plane inside the unit cell (orange surface).")
+
+        col_h, col_k, col_l = st.columns(3)
+        with col_h:
+            h_val = st.number_input("h", value=1, step=1, key="h_plane")
+        with col_k:
+            k_val = st.number_input("k", value=1, step=1, key="k_plane")
+        with col_l:
+            l_val = st.number_input("l", value=0, step=1, key="l_plane")
+
+        if st.button("Show (hkl) Plane", key="show_plane_btn"):
+            try:
+                plane_points = get_unit_cell_plane_points(h_val, k_val, l_val, lattice)
+
+                if len(plane_points) >= 3:
+                    fig_with_plane = create_crystal_3d_plot(struct, title=f"{struct.composition.reduced_formula} + ({h_val}{k_val}{l_val}) plane")
+
+                    x_p = [p[0] for p in plane_points]
+                    y_p = [p[1] for p in plane_points]
+                    z_p = [p[2] for p in plane_points]
+
+                    fig_with_plane.add_trace(go.Mesh3d(
+                        x=x_p, y=y_p, z=z_p,
+                        color='rgba(255, 165, 0, 0.45)',
+                        opacity=0.55,
+                        name=f"({h_val} {k_val} {l_val})",
+                        showlegend=True,
+                        hovertemplate=f"({h_val} {k_val} {l_val}) plane<extra></extra>"
+                    ))
+
+                    st.plotly_chart(fig_with_plane, use_container_width=True)
+                    st.success(f"Orange surface = the ({h_val} {k_val} {l_val}) crystal plane. This is the plane from which X-rays diffract at the corresponding 2θ angle.")
+                else:
+                    st.warning("This (hkl) combination does not produce a clear intersection with the unit cell. Try common values like (1,0,0), (1,1,0), or (1,1,1).")
+            except Exception as plane_err:
+                st.error(f"Could not draw plane: {plane_err}")
 
         # Optional: Show some low-index planes
         if st.checkbox("Show example (hkl) planes & d-spacings"):
@@ -1001,4 +1176,218 @@ if cif_file is not None:
         st.error(f"Failed to read CIF file: {e}")
         st.info("Make sure the file is a valid CIF format.")
 
-st.caption("Built with ❤️ for researchers • Streamlit + pybaselines + Plotly + pymatgen + stmol (optional) • Feedback welcome!")
+st.caption("Built with ❤️ for researchers • Streamlit + pybaselines + Plotly + pymatgen • Feedback welcome!")
+
+
+# ====================== PEAK BROADENING ANALYSIS ======================
+st.divider()
+st.header("📏 Peak Broadening Analysis")
+
+st.markdown("""
+Analyze **crystallite size** and **microstrain** from peak broadening.
+
+**Common sources of broadening:**
+- Small crystallite size → Scherrer broadening
+- Microstrain (lattice distortions) → Williamson-Hall analysis
+- Instrumental broadening (subtracted first)
+""")
+
+if len(peaks) > 0:
+    # Calculate FWHM from scipy find_peaks properties (in degrees 2θ)
+    x_spacing = np.mean(np.diff(x))
+    fwhm_deg = properties.get("widths", np.zeros(len(peaks))) * x_spacing
+
+    # Create broadening dataframe
+    broadening_data = []
+    for i in range(len(peaks)):
+        theta_deg = x[peaks[i]]
+        theta_rad = np.deg2rad(theta_deg / 2)
+        beta_rad = np.deg2rad(fwhm_deg[i])  # FWHM in radians
+
+        broadening_data.append({
+            "Peak #": i + 1,
+            "2θ (°)": round(theta_deg, 4),
+            "FWHM (°)": round(fwhm_deg[i], 4),
+            "FWHM (rad)": round(beta_rad, 6),
+            "cos θ": round(np.cos(theta_rad), 4),
+            "sin θ": round(np.sin(theta_rad), 4),
+        })
+
+    broad_df = pd.DataFrame(broadening_data)
+    st.dataframe(broad_df, use_container_width=True, hide_index=True)
+
+    # === Scherrer Crystallite Size ===
+    st.subheader("Scherrer Crystallite Size")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        K = st.number_input("Shape factor K", value=0.9, min_value=0.5, max_value=1.5, step=0.05,
+                            help="0.9 for spherical crystallites (common default)")
+    with col2:
+        beta_inst = st.number_input("Instrumental FWHM (°) [optional]", value=0.0, min_value=0.0, step=0.01,
+                                    help="Measure using a standard like LaB6 or Si. Set to 0 if unknown.")
+
+    if st.button("Calculate Crystallite Sizes"):
+        scherrer_results = []
+        for i in range(len(peaks)):
+            theta_deg = x[peaks[i]]
+            theta_rad = np.deg2rad(theta_deg / 2)
+            beta_sample = max(np.deg2rad(fwhm_deg[i]) - np.deg2rad(beta_inst), 1e-6)
+
+            # Scherrer equation: D = K λ / (β cos θ)
+            D_nm = (K * wavelength) / (beta_sample * np.cos(theta_rad)) / 10  # convert Å to nm
+
+            scherrer_results.append({
+                "Peak #": i + 1,
+                "2θ (°)": round(theta_deg, 2),
+                "FWHM corrected (°)": round(np.rad2deg(beta_sample), 4),
+                "Crystallite Size (nm)": round(D_nm, 1),
+            })
+
+        sch_df = pd.DataFrame(scherrer_results)
+        st.dataframe(sch_df, use_container_width=True, hide_index=True)
+
+        avg_size = np.mean([r["Crystallite Size (nm)"] for r in scherrer_results])
+        st.metric("Average Crystallite Size", f"{avg_size:.1f} nm")
+
+    # === Williamson-Hall Plot (for microstrain) ===
+    if len(peaks) >= 3:
+        st.subheader("Williamson-Hall Analysis (Size + Strain)")
+
+        st.caption("Plot β cos θ vs 4 sin θ. Slope = microstrain, intercept related to crystallite size.")
+
+        if st.button("Generate Williamson-Hall Plot"):
+            wh_x = []  # 4 sin θ
+            wh_y = []  # β cos θ (in rad)
+
+            for i in range(len(peaks)):
+                theta_deg = x[peaks[i]]
+                theta_rad = np.deg2rad(theta_deg / 2)
+                beta_rad = np.deg2rad(fwhm_deg[i]) - np.deg2rad(beta_inst)
+                beta_rad = max(beta_rad, 1e-6)
+
+                wh_x.append(4 * np.sin(theta_rad))
+                wh_y.append(beta_rad * np.cos(theta_rad))
+
+            # Linear fit
+            coeffs = np.polyfit(wh_x, wh_y, 1)
+            slope = coeffs[0]
+            intercept = coeffs[1]
+
+            # Microstrain ε = slope / 4
+            microstrain = slope / 4
+            # Size from intercept: D = K λ / intercept
+            size_from_wh = (K * wavelength) / max(intercept, 1e-6) / 10  # nm
+
+            # Create plot
+            fig_wh = go.Figure()
+            fig_wh.add_trace(go.Scatter(
+                x=wh_x, y=wh_y,
+                mode='markers+text',
+                text=[f"({i+1})" for i in range(len(peaks))],
+                textposition="top center",
+                marker=dict(size=10, color="blue"),
+                name="Data points"
+            ))
+
+            # Fitted line
+            x_fit = np.linspace(min(wh_x), max(wh_x), 100)
+            y_fit = np.polyval(coeffs, x_fit)
+            fig_wh.add_trace(go.Scatter(
+                x=x_fit, y=y_fit,
+                mode='lines',
+                line=dict(color="red", dash="dash"),
+                name=f"Fit: ε = {microstrain:.4f}, D ≈ {size_from_wh:.1f} nm"
+            ))
+
+            fig_wh.update_layout(
+                title="Williamson-Hall Plot",
+                xaxis_title="4 sin θ",
+                yaxis_title="β cos θ (rad)",
+                height=450
+            )
+            st.plotly_chart(fig_wh, use_container_width=True)
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.metric("Microstrain (ε)", f"{microstrain:.4f}")
+            with col_b:
+                st.metric("Crystallite Size (from WH)", f"{size_from_wh:.1f} nm")
+
+            st.caption("Note: Williamson-Hall assumes isotropic strain and spherical crystallites. Results are approximate.")
+else:
+    st.info("Detect peaks first in the main analysis section to enable broadening analysis.")
+
+
+# ====================== MILLER PLANE VISUALIZATION ======================
+def get_unit_cell_plane_points(h, k, l, lattice):
+    """
+    Calculate the intersection points of the (hkl) plane with the unit cell.
+    Returns a list of cartesian points forming the polygon.
+    """
+    if h == 0 and k == 0 and l == 0:
+        return []
+
+    # Plane equation in fractional coordinates: h*x + k*y + l*z = 1 (for non-zero)
+    # We find intersections with the 12 edges of the unit cell [0,1]^3
+
+    edges = [
+        ((0,0,0), (1,0,0)), ((0,0,0), (0,1,0)), ((0,0,0), (0,0,1)),
+        ((1,0,0), (1,1,0)), ((1,0,0), (1,0,1)),
+        ((0,1,0), (1,1,0)), ((0,1,0), (0,1,1)),
+        ((0,0,1), (1,0,1)), ((0,0,1), (0,1,1)),
+        ((1,1,0), (1,1,1)), ((1,0,1), (1,1,1)), ((0,1,1), (1,1,1))
+    ]
+
+    points = []
+    eps = 1e-8
+
+    for p1, p2 in edges:
+        # Parametric line: P = p1 + t*(p2 - p1), t in [0,1]
+        dx, dy, dz = p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]
+
+        # Solve h*(x0 + t*dx) + k*(y0 + t*dy) + l*(z0 + t*dz) = 1
+        denom = h*dx + k*dy + l*dz
+        if abs(denom) < eps:
+            continue
+
+        t = (1 - (h*p1[0] + k*p1[1] + l*p1[2])) / denom
+
+        if 0 <= t <= 1:
+            x = p1[0] + t * dx
+            y = p1[1] + t * dy
+            z = p1[2] + t * dz
+            cart = lattice.get_cartesian_coords([x, y, z])
+            points.append(cart)
+
+    # Remove duplicates and order them (simple convex hull approximation)
+    if len(points) < 3:
+        return []
+
+    # Simple ordering around the plane normal
+    normal = np.array([h, k, l], dtype=float)
+    normal /= np.linalg.norm(normal)
+
+    # Project to 2D for ordering
+    if abs(normal[0]) > 0.5:
+        basis1 = np.array([0, 1, 0])
+    else:
+        basis1 = np.array([1, 0, 0])
+    basis2 = np.cross(normal, basis1)
+    basis2 /= np.linalg.norm(basis2)
+
+    projected = []
+    for p in points:
+        vec = np.array(p)
+        u = np.dot(vec, basis1)
+        v = np.dot(vec, basis2)
+        projected.append((u, v, p))
+
+    # Sort by angle
+    center = np.mean([p[2] for p in projected], axis=0)
+    projected.sort(key=lambda item: np.arctan2(
+        np.dot(item[2] - center, basis2),
+        np.dot(item[2] - center, basis1)
+    ))
+
+    return [p[2] for p in projected]
