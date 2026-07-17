@@ -6,3 +6,5 @@ plotly
 pybaselines
 pymatgen
 mp-api
+requests
+aflow

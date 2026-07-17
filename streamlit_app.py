@@ -17,7 +17,7 @@ Features:
 - Demo data generator for testing
 
 Installation (run once):
-    pip install streamlit pandas numpy scipy plotly pybaselines pymatgen mp-api
+    pip install streamlit pandas numpy scipy plotly pybaselines pymatgen mp-api requests aflow
 
 Run:
     streamlit run xrd_analyzer.py
@@ -747,313 +747,539 @@ with st.expander("💡 Tips for Best Results & Common Issues", expanded=False):
 
 st.divider()
 
-# ====================== PHASE IDENTIFICATION (Materials Project) ======================
+# ====================== PHASE IDENTIFICATION (Multi-Database) ======================
 st.header("🔬 Phase Identification")
 
 with st.expander("ℹ️ Note on JCPDS / ICDD vs Free Alternatives", expanded=False):
     st.markdown("""
     **Official JCPDS/ICDD Powder Diffraction File (PDF)** is a **commercial paid database** — the gold standard but requires a license.
 
-    **Excellent free alternative we support here**:
-    - **Materials Project** (free API key at materialsproject.org)
-    - Combined with `pymatgen` for realistic XRD pattern simulation from actual crystal structures.
+    **Excellent free alternatives supported here**:
+    - **Crystallography Open Database (COD)** — large open collection of *experimental* crystal structures (minerals, inorganics, organics). **No API key required.**
+    - **AFLOW** — very large computational library + many ICSD-derived structures. **No API key required.**
+    - **Materials Project** (high-quality computed + experimental structures; free API key at materialsproject.org)
     
-    This approach is commonly used in research for inorganic materials phase identification. 
+    All three are combined with `pymatgen` for realistic XRD pattern simulation from actual crystal structures.
     You get crystal system, space group, lattice parameters, and a match score against your experimental peaks.
     """)
 
-mp_api_key = st.text_input(
-    "Materials Project API Key (get free at materialsproject.org)",
-    type="password",
-    placeholder="mp-XXXXXXXXXXXXXXXX",
-    help="Your key is used only in the current browser session. It is never saved to disk or sent anywhere else."
+# Database selector
+db_choice = st.radio(
+    "Select database to search",
+    options=[
+        "Crystallography Open Database (COD) — free, no key",
+        "AFLOW — free, no key (computational + ICSD)",
+        "Materials Project (requires free API key)"
+    ],
+    index=0,
+    horizontal=True,
+    help="COD = experimental structures (great for minerals). AFLOW = large computational + experimental library. Materials Project = high-quality computed phases."
 )
 
-if mp_api_key:
-    try:
-        from mp_api.client import MPRester
-        from pymatgen.analysis.diffraction.xrd import XRDCalculator
-        HAS_MP_LIBS = True
-    except ImportError:
-        HAS_MP_LIBS = False
-        st.error("Missing packages. Please run:\n`pip install pymatgen mp-api`")
-    
-    if HAS_MP_LIBS:
-        st.success("✅ Materials Project libraries loaded. Ready for phase search.")
+# Shared inputs
+col1, col2 = st.columns([2, 1])
+with col1:
+    if "COD" in db_choice:
+        search_query = st.text_input(
+            "Chemical formula or elements (comma-separated)",
+            value="Fe2O3",
+            help="For COD: prefer a formula like Fe2O3 or CaCO3. You can also list elements (e.g. Fe, O)."
+        )
+    else:
+        search_query = st.text_input(
+            "Elements in your sample (comma-separated)",
+            value="Fe, O",
+            help="Example: Fe, O   or   Ca, C, O   or   Ti, O"
+        )
+with col2:
+    max_cands = st.slider("Max candidates", min_value=5, max_value=30, value=12, step=1)
 
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            elements_str = st.text_input(
-                "Elements in your sample (comma-separated)",
-                value="Fe, O",
-                help="Example: Fe, O   or   Ca, C, O   or   Ti, O"
-            )
-        with col2:
-            max_cands = st.slider("Max candidates", min_value=5, max_value=30, value=12, step=1)
+# ---------- Materials Project path ----------
+mp_api_key = None
+if "Materials Project" in db_choice:
+    mp_api_key = st.text_input(
+        "Materials Project API Key (get free at materialsproject.org)",
+        type="password",
+        placeholder="mp-XXXXXXXXXXXXXXXX",
+        help="Your key is used only in the current browser session. It is never saved to disk or sent anywhere else."
+    )
 
-        if st.button("🔍 Search Materials Project Database", type="primary", use_container_width=True):
-            try:
-                elements = [e.strip() for e in elements_str.split(",") if e.strip()]
-                with MPRester(mp_api_key) as mpr:
-                    docs = mpr.materials.summary.search(
-                        elements=elements,
-                        fields=[
-                            "material_id", "formula_pretty", "chemsys",
-                            "symmetry", "nsites", "density"
-                        ],
-                        chunk_size=max_cands
-                    )
-                st.session_state["mp_docs"] = docs
-                st.success(f"Found **{len(docs)}** candidate structures in the {elements} chemical system(s).")
-            except Exception as e:
-                st.error(f"Search failed: {str(e)}")
-                if "API key" in str(e).lower() or "unauthorized" in str(e).lower():
-                    st.info("Double-check your API key at https://materialsproject.org/")
+# Common imports needed for both
+try:
+    from pymatgen.analysis.diffraction.xrd import XRDCalculator
+    from pymatgen.core import Structure, Composition
+    HAS_PYMATGEN = True
+except ImportError:
+    HAS_PYMATGEN = False
+    st.error("pymatgen is required. Install with: `pip install pymatgen`")
 
-        if "mp_docs" in st.session_state:
-            docs = st.session_state["mp_docs"]
-            
-            # Display candidates nicely
-            cand_rows = []
-            for doc in docs:
-                # Extract symmetry info safely (crystal_system and spacegroup are inside .symmetry)
-                sym = getattr(doc, "symmetry", None)
-                crystal_sys = getattr(sym, "crystal_system", "N/A") if sym else "N/A"
-                space_group = getattr(sym, "symbol", "N/A") if sym else "N/A"
+# ========== COD SEARCH ==========
+if "COD" in db_choice and HAS_PYMATGEN:
+    st.info("🔎 Searching the **Crystallography Open Database (COD)** — experimental structures, no API key needed.")
 
-                cand_rows.append({
-                    "ID": doc.material_id,
-                    "Formula": getattr(doc, "formula_pretty", "N/A"),
-                    "Crystal System": crystal_sys,
-                    "Space Group": space_group,
-                    "# Atoms": getattr(doc, "nsites", "?"),
-                    "Density": round(getattr(doc, "density", 0), 2) if getattr(doc, "density", None) else "—"
-                })
-            cand_df = pd.DataFrame(cand_rows)
-            st.dataframe(cand_df, use_container_width=True, hide_index=True, height=220)
+    if st.button("🔍 Search COD Database", type="primary", use_container_width=True):
+        try:
+            from pymatgen.ext.cod import COD
+            import requests
 
-            selected_mp_id = st.selectbox(
-                "Choose a structure to simulate its XRD pattern and match against your peaks",
-                options=[d.material_id for d in docs],
-                format_func=lambda x: f"{x} — {next((d.formula_pretty for d in docs if d.material_id==x), '')}"
-            )
+            cod = COD(timeout=45)
+            candidates = []
 
-            tolerance = st.slider("2θ matching tolerance (°)", min_value=0.05, max_value=0.5, value=0.15, step=0.05,
-                                  help="How close a theoretical peak must be to an experimental one to count as a match.")
+            query = search_query.strip()
+            # Detect if it looks like a formula (contains digits) or element list
+            is_formula_like = any(c.isdigit() for c in query) and "," not in query
 
-            if st.button("📐 Simulate Pattern & Calculate Match Score", use_container_width=True):
+            if is_formula_like:
+                # Direct formula search (preferred for COD)
                 try:
-                    with MPRester(mp_api_key) as mpr:
-                        structure = mpr.get_structure_by_material_id(selected_mp_id)
-                    
-                    # Simulate theoretical pattern
-                    xrd_calc = XRDCalculator(wavelength=wavelength)
-                    theo_pattern = xrd_calc.get_pattern(
-                        structure, 
-                        two_theta_range=(float(x.min()), float(x.max()))
-                    )
-                    
-                    theo_2theta = np.array(theo_pattern.x)
-                    theo_intensity = np.array(theo_pattern.y)
-                    
-                    # Simple but effective peak matching
-                    exp_2thetas = peaks_df["2θ (°)"].values if len(peaks_df) > 0 else np.array([])
-                    matches = []
-                    
-                    for exp_th in exp_2thetas:
-                        if len(theo_2theta) == 0:
-                            continue
-                        diffs = np.abs(theo_2theta - exp_th)
-                        min_diff = diffs.min()
-                        if min_diff <= tolerance:
-                            best_idx = np.argmin(diffs)
-                            matches.append({
-                                "Experimental 2θ": round(exp_th, 4),
-                                "Theoretical 2θ": round(theo_2theta[best_idx], 4),
-                                "Δ (°)": round(min_diff, 3),
-                                "Theo. Intensity": round(theo_intensity[best_idx], 1),
-                            })
-                    
-                    match_pct = (len(matches) / len(exp_2thetas) * 100) if len(exp_2thetas) > 0 else 0
-                    
-                    st.metric("Peak Match Score", f"{match_pct:.1f}%", 
-                              help=f"{len(matches)} out of {len(exp_2thetas)} experimental peaks matched within ±{tolerance}°")
-                    
-                    if matches:
-                        st.dataframe(pd.DataFrame(matches), use_container_width=True, hide_index=True)
-                        st.caption("Higher match % + presence of strong theoretical peaks usually indicates a good candidate phase.")
-                    else:
-                        st.warning("No close matches found with current tolerance. Try increasing the tolerance or check if this phase is realistic for your sample.")
-                    
-                    # Bonus: show some crystal info
-                    try:
-                        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
-                        sga = SpacegroupAnalyzer(structure)
-                        crystal_sys = sga.get_crystal_system()
-                    except:
-                        crystal_sys = "N/A"
-                    st.info(f"**{structure.composition.reduced_formula}** — {structure.get_space_group_info()[1]} ({crystal_sys})")
-
-                    # Persist for 3D visualization and enhanced matching
-                    st.session_state["last_structure"] = structure
-                    st.session_state["last_theo_pattern"] = theo_pattern
-                    st.session_state["last_mp_id"] = selected_mp_id
-
-                    # Offer CIF download
-                    try:
-                        cif_content = structure.to(fmt="cif")
-                        st.download_button(
-                            label="⬇️ Download CIF file",
-                            data=cif_content,
-                            file_name=f"{structure.composition.reduced_formula.replace(' ', '')}.cif",
-                            mime="chemical/x-cif",
-                            help="Download the crystal structure as a CIF file. You can open it in VESTA, Mercury, or upload it to the Crystal Structure Viewer below."
-                        )
-                    except Exception as cif_err:
-                        st.caption(f"Could not generate CIF: {cif_err}")
-
-                except Exception as e:
-                    st.error(f"Failed to fetch/simulate structure: {e}")
-
-        # ====================== 3D CRYSTAL STRUCTURE + d-SPACING / (hkl) VISUALIZATION ======================
-        if "last_structure" in st.session_state:
-            st.divider()
-            st.subheader("🧊 3D Interactive Crystal Structure + Plane Visualization")
-
-            struct = st.session_state["last_structure"]
-            theo_pat = st.session_state.get("last_theo_pattern", None)
-
-            # Crystal info summary
-            col_info1, col_info2, col_info3 = st.columns(3)
-            with col_info1:
-                st.metric("Formula", struct.composition.reduced_formula)
-            with col_info2:
-                sg_info = struct.get_space_group_info()
-                st.metric("Space Group", sg_info[1])
-            with col_info3:
-                try:
-                    from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
-                    sga = SpacegroupAnalyzer(struct)
-                    crystal_sys = sga.get_crystal_system()
-                except:
-                    crystal_sys = "N/A"
-                st.metric("Crystal System", crystal_sys)
-
-            # Lattice parameters
-            lattice = struct.lattice
-            st.caption(f"**Lattice parameters:** a = {lattice.a:.4f} Å | b = {lattice.b:.4f} Å | c = {lattice.c:.4f} Å  |  "
-                       f"α = {lattice.alpha:.1f}° β = {lattice.beta:.1f}° γ = {lattice.gamma:.1f}°  |  Volume = {lattice.volume:.2f} Å³")
-
-            # 3D Viewer (Plotly - works on Streamlit Cloud)
-            show_3d = st.checkbox("🧊 Show interactive 3D crystal structure", value=True)
-            if show_3d:
-                try:
-                    fig_3d = create_crystal_3d_plot(struct, title=f"{struct.composition.reduced_formula} - 3D View")
-                    if fig_3d:
-                        st.plotly_chart(fig_3d, use_container_width=True)
-                        st.caption("Interactive 3D view • Drag to rotate • Scroll to zoom • Different colors = different elements (see legend)")
-                except Exception as viz_err:
-                    st.error(f"3D view error: {viz_err}")
-
-            # Enhanced table: d-spacing + (hkl) faces for matched peaks
-            if theo_pat is not None and len(peaks_df) > 0:
-                st.markdown("**Your experimental peaks matched to crystal planes (hkl) and d-spacings**")
-
-                exp_2thetas = peaks_df["2θ (°)"].values
-                theo_2theta = np.array(theo_pat.x)
-                theo_intensity = np.array(theo_pat.y)
-                theo_hkls = getattr(theo_pat, 'hkls', [[]] * len(theo_2theta))
-
-                enhanced = []
-                tol = 0.15
-                for exp_th in exp_2thetas:
-                    diffs = np.abs(theo_2theta - exp_th)
-                    if diffs.min() <= tol:
-                        idx = np.argmin(diffs)
-                        hkl_data = theo_hkls[idx] if idx < len(theo_hkls) else []
-                        hkl_str = str(hkl_data[0].get('hkl', '—')) if hkl_data and len(hkl_data) > 0 else "—"
-
-                        try:
-                            d_val = lattice.d_hkl(hkl_data[0]['hkl']) if hkl_data and len(hkl_data) > 0 else None
-                        except:
-                            d_val = peaks_df.loc[np.isclose(peaks_df["2θ (°)"], exp_th, atol=0.01), "d-spacing (Å)"].values
-                            d_val = d_val[0] if len(d_val) > 0 else None
-
-                        enhanced.append({
-                            "Exp 2θ (°)": round(exp_th, 4),
-                            "Theo 2θ (°)": round(theo_2theta[idx], 4),
-                            "Δ°": round(diffs.min(), 3),
-                            "(hkl) plane": hkl_str,
-                            "d-spacing (Å)": round(d_val, 4) if d_val else "—",
-                            "Intensity (theo)": round(theo_intensity[idx], 1)
+                    results = cod.get_structure_by_formula(query)
+                    for item in results[:max_cands]:
+                        struct = item["structure"]
+                        candidates.append({
+                            "id": f"cod-{item['cod_id']}",
+                            "formula": struct.composition.reduced_formula,
+                            "sg": item.get("sg", "N/A"),
+                            "nsites": len(struct),
+                            "structure": struct,
+                            "source": "COD"
                         })
+                except Exception as e:
+                    st.warning(f"Formula search returned no/limited results ({e}). Trying element-based search...")
 
-                if enhanced:
-                    st.dataframe(pd.DataFrame(enhanced), use_container_width=True, hide_index=True)
-                    st.caption("Each matched peak corresponds to diffraction from a specific set of crystal planes (hkl). The d-spacing is the interplanar distance.")
+            if not candidates:
+                # Element-based search via COD REST API (el1, el2, ...)
+                elements = [e.strip() for e in query.replace(",", " ").split() if e.strip()]
+                if not elements:
+                    elements = [e.strip() for e in query.split(",") if e.strip()]
 
-                    # === NEW: Auto-show plane on selection ===
-                    if "last_structure" in st.session_state:
-                        struct = st.session_state["last_structure"]
-                        lattice = struct.lattice
+                params = {"format": "json"}
+                for i, el in enumerate(elements[:8], start=1):
+                    params[f"el{i}"] = el
 
-                        # Build selectable options from matched planes
-                        plane_options = []
-                        parsed_hkls = []
-                        for row in enhanced:
-                            hkl_str = row["(hkl) plane"]
-                            if hkl_str and hkl_str != "—":
-                                try:
-                                    # Parse common formats like [1, 1, 1] or (1, 1, 0)
-                                    hkl = tuple(int(x) for x in hkl_str.strip("()[]").split(","))
-                                    if len(hkl) == 3:
-                                        label = f"({hkl[0]} {hkl[1]} {hkl[2]})  •  d = {row['d-spacing (Å)']} Å"
-                                        plane_options.append(label)
-                                        parsed_hkls.append(hkl)
-                                except:
-                                    continue
+                # Limit to reasonable number of distinct elements
+                params["strictmax"] = len(elements) + 1  # allow a bit of flexibility
 
-                        if plane_options:
-                            st.markdown("**Visualize matched plane in 3D**")
-                            selected_label = st.selectbox(
-                                "Choose a plane from your matched peaks:",
-                                options=plane_options,
-                                key="plane_selector"
-                            )
+                resp = requests.get("https://www.crystallography.net/cod/result", params=params, timeout=45)
+                resp.raise_for_status()
+                entries = resp.json()
 
-                            if st.button("Show Selected Plane in 3D Viewer", key="show_selected_plane"):
-                                try:
-                                    sel_idx = plane_options.index(selected_label)
-                                    h, k, l = parsed_hkls[sel_idx]
+                # Take first N unique IDs and fetch structures
+                seen = set()
+                for entry in entries:
+                    cod_id = int(entry.get("file", 0))
+                    if cod_id in seen or cod_id == 0:
+                        continue
+                    seen.add(cod_id)
+                    try:
+                        struct = cod.get_structure_by_id(cod_id)
+                        candidates.append({
+                            "id": f"cod-{cod_id}",
+                            "formula": struct.composition.reduced_formula,
+                            "sg": entry.get("sg", "N/A"),
+                            "nsites": len(struct),
+                            "structure": struct,
+                            "source": "COD"
+                        })
+                        if len(candidates) >= max_cands:
+                            break
+                    except Exception:
+                        continue
 
-                                    plane_points = get_unit_cell_plane_points(h, k, l, lattice)
+            if candidates:
+                st.session_state["phase_candidates"] = candidates
+                st.session_state["phase_db"] = "COD"
+                st.success(f"Found **{len(candidates)}** candidate structures from COD.")
+            else:
+                st.warning("No matching structures found in COD for this query. Try a simpler formula (e.g. Fe2O3) or fewer elements.")
+        except Exception as e:
+            st.error(f"COD search failed: {e}")
+            st.info("Check your internet connection. COD is a public free service.")
 
-                                    if len(plane_points) >= 3:
-                                        fig_plane = create_crystal_3d_plot(struct, title=f"{struct.composition.reduced_formula} + ({h} {k} {l}) plane")
+# ========== AFLOW SEARCH ==========
+elif "AFLOW" in db_choice and HAS_PYMATGEN:
+    st.info("🔎 Searching **AFLOW** — large computational + ICSD-derived library (free, no API key).")
 
-                                        x_p = [p[0] for p in plane_points]
-                                        y_p = [p[1] for p in plane_points]
-                                        z_p = [p[2] for p in plane_points]
+    # Optional dependency
+    try:
+        from aflow import search, K
+        HAS_AFLOW = True
+    except ImportError:
+        HAS_AFLOW = False
+        st.error("AFLOW Python client not installed. Run:\n`pip install aflow`")
+        st.caption("The `aflow` package is a lightweight wrapper around the public AFLUX API.")
 
-                                        fig_plane.add_trace(go.Mesh3d(
-                                            x=x_p, y=y_p, z=z_p,
-                                            color='rgba(255, 165, 0, 0.5)',
-                                            opacity=0.6,
-                                            name=f"({h} {k} {l})",
-                                            showlegend=True
-                                        ))
-
-                                        st.plotly_chart(fig_plane, use_container_width=True)
-                                        st.success(f"Showing the ({h} {k} {l}) plane corresponding to the selected matched peak.")
-                                    else:
-                                        st.warning("This plane does not intersect the unit cell well.")
-                                except Exception as draw_err:
-                                    st.error(f"Could not draw the plane: {draw_err}")
+    if HAS_AFLOW:
+        if st.button("🔍 Search AFLOW Database", type="primary", use_container_width=True):
+            try:
+                elements = [e.strip() for e in search_query.replace(",", " ").split() if e.strip()]
+                if not elements:
+                    st.warning("Please enter at least one element.")
                 else:
-                    st.caption("No (hkl) details available at current tolerance.")
+                    # Build filter: species(Fe),species(O) or species(Fe,O) depending on version
+                    # Most reliable: species(Fe),species(O),nspecies(2) for exact match, but we allow extra elements for flexibility
+                    filter_parts = [f"species({el})" for el in elements]
+                    # Prefer compounds that contain at least these elements
+                    filter_str = ",".join(filter_parts)
 
-else:
-    st.info("Enter a free Materials Project API key above to unlock automated phase identification against real crystal structures.")
+                    # Use a reasonable batch and limit
+                    results = search(batch_size=min(max_cands * 3, 50)).filter(filter_str)
+
+                    candidates = []
+                    count = 0
+                    for entry in results:
+                        if count >= max_cands:
+                            break
+                        try:
+                            # Prefer getting a pymatgen Structure
+                            structure = None
+
+                            # Method 1: try ASE atoms → pymatgen (if ASE available)
+                            try:
+                                atoms = entry.atoms
+                                if atoms is not None:
+                                    structure = Structure.from_ase_atoms(atoms)
+                            except Exception:
+                                pass
+
+                            # Method 2: fall back to downloading geometry / CONTCAR via aurl
+                            if structure is None:
+                                try:
+                                    aurl = getattr(entry, "aurl", None) or entry.raw.get("aurl", "")
+                                    if aurl:
+                                        # AFLOW geometry endpoint returns POSCAR-like content
+                                        import requests
+                                        geom_url = aurl.rstrip("/") + "/?geometry"
+                                        r = requests.get(geom_url, timeout=20)
+                                        if r.status_code == 200 and r.text.strip():
+                                            structure = Structure.from_str(r.text, fmt="poscar")
+                                except Exception:
+                                    pass
+
+                            if structure is None:
+                                continue
+
+                            # Get some metadata
+                            formula = getattr(entry, "compound", None) or structure.composition.reduced_formula
+                            sg = getattr(entry, "spacegroup_relax", None) or "N/A"
+                            try:
+                                nsites = len(structure)
+                            except Exception:
+                                nsites = "?"
+
+                            candidates.append({
+                                "id": f"aflow-{getattr(entry, 'auid', count)}",
+                                "formula": formula,
+                                "sg": str(sg),
+                                "nsites": nsites,
+                                "structure": structure,
+                                "source": "AFLOW",
+                                "entry": entry  # keep reference if needed
+                            })
+                            count += 1
+                        except Exception:
+                            continue
+
+                    if candidates:
+                        st.session_state["phase_candidates"] = candidates
+                        st.session_state["phase_db"] = "AFLOW"
+                        st.success(f"Found **{len(candidates)}** candidate structures from AFLOW.")
+                    else:
+                        st.warning("No matching structures retrieved from AFLOW for this query. Try fewer elements or a common composition (e.g. Fe, O).")
+            except Exception as e:
+                st.error(f"AFLOW search failed: {e}")
+                st.info("AFLOW servers can occasionally be slow or rate-limited. Try again in a moment.")
+
+# ========== MATERIALS PROJECT SEARCH ==========
+elif "Materials Project" in db_choice and HAS_PYMATGEN:
+    if not mp_api_key:
+        st.warning("Enter your free Materials Project API key above to search.")
+    else:
+        try:
+            from mp_api.client import MPRester
+            HAS_MP = True
+        except ImportError:
+            HAS_MP = False
+            st.error("Missing packages. Please run: `pip install pymatgen mp-api`")
+
+        if HAS_MP:
+            st.success("✅ Materials Project libraries ready.")
+
+            if st.button("🔍 Search Materials Project Database", type="primary", use_container_width=True):
+                try:
+                    elements = [e.strip() for e in search_query.split(",") if e.strip()]
+                    with MPRester(mp_api_key) as mpr:
+                        docs = mpr.materials.summary.search(
+                            elements=elements,
+                            fields=["material_id", "formula_pretty", "chemsys", "symmetry", "nsites", "density"],
+                            chunk_size=max_cands
+                        )
+                    candidates = []
+                    for doc in docs:
+                        sym = getattr(doc, "symmetry", None)
+                        candidates.append({
+                            "id": doc.material_id,
+                            "formula": getattr(doc, "formula_pretty", "N/A"),
+                            "sg": getattr(sym, "symbol", "N/A") if sym else "N/A",
+                            "crystal_system": getattr(sym, "crystal_system", "N/A") if sym else "N/A",
+                            "nsites": getattr(doc, "nsites", "?"),
+                            "density": round(getattr(doc, "density", 0), 2) if getattr(doc, "density", None) else None,
+                            "doc": doc,  # keep original for later fetch
+                            "source": "MP"
+                        })
+                    st.session_state["phase_candidates"] = candidates
+                    st.session_state["phase_db"] = "MP"
+                    st.session_state["mp_api_key"] = mp_api_key
+                    st.success(f"Found **{len(candidates)}** candidate structures in Materials Project.")
+                except Exception as e:
+                    st.error(f"Search failed: {str(e)}")
+                    if "API key" in str(e).lower() or "unauthorized" in str(e).lower():
+                        st.info("Double-check your API key at https://materialsproject.org/")
+
+# ========== COMMON CANDIDATE DISPLAY + MATCHING ==========
+if "phase_candidates" in st.session_state and st.session_state["phase_candidates"]:
+    candidates = st.session_state["phase_candidates"]
+    db_used = st.session_state.get("phase_db", "Unknown")
+
+    # Display table
+    cand_rows = []
+    for c in candidates:
+        row = {
+            "ID": c["id"],
+            "Formula": c["formula"],
+            "Space Group": c.get("sg", "N/A"),
+            "# Atoms": c.get("nsites", "?"),
+        }
+        if "crystal_system" in c:
+            row["Crystal System"] = c["crystal_system"]
+        if c.get("density") is not None:
+            row["Density"] = c["density"]
+        cand_rows.append(row)
+
+    st.dataframe(pd.DataFrame(cand_rows), use_container_width=True, hide_index=True, height=220)
+
+    selected_id = st.selectbox(
+        "Choose a structure to simulate its XRD pattern and match against your peaks",
+        options=[c["id"] for c in candidates],
+        format_func=lambda x: f"{x} — {next((c['formula'] for c in candidates if c['id']==x), '')}"
+    )
+
+    tolerance = st.slider(
+        "2θ matching tolerance (°)",
+        min_value=0.05, max_value=0.5, value=0.15, step=0.05,
+        help="How close a theoretical peak must be to an experimental one to count as a match."
+    )
+
+    if st.button("📐 Simulate Pattern & Calculate Match Score", use_container_width=True):
+        try:
+            # Retrieve the Structure object
+            selected = next(c for c in candidates if c["id"] == selected_id)
+
+            if selected["source"] in ("COD", "AFLOW"):
+                structure = selected["structure"]
+            else:  # Materials Project
+                with MPRester(st.session_state.get("mp_api_key", mp_api_key)) as mpr:
+                    structure = mpr.get_structure_by_material_id(selected_id)
+
+            # Simulate theoretical pattern
+            xrd_calc = XRDCalculator(wavelength=wavelength)
+            theo_pattern = xrd_calc.get_pattern(
+                structure,
+                two_theta_range=(float(x.min()), float(x.max()))
+            )
+
+            theo_2theta = np.array(theo_pattern.x)
+            theo_intensity = np.array(theo_pattern.y)
+
+            # Peak matching
+            exp_2thetas = peaks_df["2θ (°)"].values if len(peaks_df) > 0 else np.array([])
+            matches = []
+
+            for exp_th in exp_2thetas:
+                if len(theo_2theta) == 0:
+                    continue
+                diffs = np.abs(theo_2theta - exp_th)
+                min_diff = diffs.min()
+                if min_diff <= tolerance:
+                    best_idx = np.argmin(diffs)
+                    matches.append({
+                        "Experimental 2θ": round(exp_th, 4),
+                        "Theoretical 2θ": round(theo_2theta[best_idx], 4),
+                        "Δ (°)": round(min_diff, 3),
+                        "Theo. Intensity": round(theo_intensity[best_idx], 1),
+                    })
+
+            match_pct = (len(matches) / len(exp_2thetas) * 100) if len(exp_2thetas) > 0 else 0
+
+            st.metric(
+                "Peak Match Score",
+                f"{match_pct:.1f}%",
+                help=f"{len(matches)} out of {len(exp_2thetas)} experimental peaks matched within ±{tolerance}°"
+            )
+
+            if matches:
+                st.dataframe(pd.DataFrame(matches), use_container_width=True, hide_index=True)
+                st.caption("Higher match % + presence of strong theoretical peaks usually indicates a good candidate phase.")
+            else:
+                st.warning("No close matches found with current tolerance. Try increasing the tolerance or check if this phase is realistic for your sample.")
+
+            # Crystal info
+            try:
+                from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+                sga = SpacegroupAnalyzer(structure)
+                crystal_sys = sga.get_crystal_system()
+            except Exception:
+                crystal_sys = "N/A"
+            st.info(f"**{structure.composition.reduced_formula}** — {structure.get_space_group_info()[1]} ({crystal_sys})  ·  Source: {db_used}")
+
+            # Persist for 3D + plane visualization
+            st.session_state["last_structure"] = structure
+            st.session_state["last_theo_pattern"] = theo_pattern
+            st.session_state["last_source_id"] = selected_id
+
+            # CIF download
+            try:
+                cif_content = structure.to(fmt="cif")
+                st.download_button(
+                    label="⬇️ Download CIF file",
+                    data=cif_content,
+                    file_name=f"{structure.composition.reduced_formula.replace(' ', '')}.cif",
+                    mime="chemical/x-cif",
+                    help="Download the crystal structure as a CIF file. You can open it in VESTA, Mercury, or upload it to the Crystal Structure Viewer below."
+                )
+            except Exception as cif_err:
+                st.caption(f"Could not generate CIF: {cif_err}")
+
+        except Exception as e:
+            st.error(f"Failed to fetch/simulate structure: {e}")
+
+# ========== 3D + (hkl) VISUALIZATION (shared) ==========
+if "last_structure" in st.session_state:
+    st.divider()
+    st.subheader("🧊 3D Interactive Crystal Structure + Plane Visualization")
+
+    struct = st.session_state["last_structure"]
+    theo_pat = st.session_state.get("last_theo_pattern", None)
+
+    col_info1, col_info2, col_info3 = st.columns(3)
+    with col_info1:
+        st.metric("Formula", struct.composition.reduced_formula)
+    with col_info2:
+        sg_info = struct.get_space_group_info()
+        st.metric("Space Group", sg_info[1])
+    with col_info3:
+        try:
+            from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+            sga = SpacegroupAnalyzer(struct)
+            crystal_sys = sga.get_crystal_system()
+        except Exception:
+            crystal_sys = "N/A"
+        st.metric("Crystal System", crystal_sys)
+
+    lattice = struct.lattice
+    st.caption(
+        f"**Lattice parameters:** a = {lattice.a:.4f} Å | b = {lattice.b:.4f} Å | c = {lattice.c:.4f} Å  |  "
+        f"α = {lattice.alpha:.1f}° β = {lattice.beta:.1f}° γ = {lattice.gamma:.1f}°  |  Volume = {lattice.volume:.2f} Å³"
+    )
+
+    show_3d = st.checkbox("🧊 Show interactive 3D crystal structure", value=True, key="show_3d_main")
+    if show_3d:
+        try:
+            fig_3d = create_crystal_3d_plot(struct, title=f"{struct.composition.reduced_formula} - 3D View")
+            if fig_3d:
+                st.plotly_chart(fig_3d, use_container_width=True)
+                st.caption("Interactive 3D view • Drag to rotate • Scroll to zoom • Different colors = different elements (see legend)")
+        except Exception as viz_err:
+            st.error(f"3D view error: {viz_err}")
+
+    # Enhanced (hkl) matching table
+    if theo_pat is not None and len(peaks_df) > 0:
+        st.markdown("**Your experimental peaks matched to crystal planes (hkl) and d-spacings**")
+
+        exp_2thetas = peaks_df["2θ (°)"].values
+        theo_2theta = np.array(theo_pat.x)
+        theo_intensity = np.array(theo_pat.y)
+        theo_hkls = getattr(theo_pat, "hkls", [[]] * len(theo_2theta))
+
+        enhanced = []
+        tol = 0.15
+        for exp_th in exp_2thetas:
+            diffs = np.abs(theo_2theta - exp_th)
+            if diffs.min() <= tol:
+                idx = np.argmin(diffs)
+                hkl_data = theo_hkls[idx] if idx < len(theo_hkls) else []
+                hkl_str = str(hkl_data[0].get("hkl", "—")) if hkl_data and len(hkl_data) > 0 else "—"
+
+                try:
+                    d_val = lattice.d_hkl(hkl_data[0]["hkl"]) if hkl_data and len(hkl_data) > 0 else None
+                except Exception:
+                    d_val = peaks_df.loc[np.isclose(peaks_df["2θ (°)"], exp_th, atol=0.01), "d-spacing (Å)"].values
+                    d_val = d_val[0] if len(d_val) > 0 else None
+
+                enhanced.append({
+                    "Exp 2θ (°)": round(exp_th, 4),
+                    "Theo 2θ (°)": round(theo_2theta[idx], 4),
+                    "Δ°": round(diffs.min(), 3),
+                    "(hkl) plane": hkl_str,
+                    "d-spacing (Å)": round(d_val, 4) if d_val else "—",
+                    "Intensity (theo)": round(theo_intensity[idx], 1)
+                })
+
+        if enhanced:
+            st.dataframe(pd.DataFrame(enhanced), use_container_width=True, hide_index=True)
+            st.caption("Each matched peak corresponds to diffraction from a specific set of crystal planes (hkl). The d-spacing is the interplanar distance.")
+
+            # Plane visualizer
+            plane_options = []
+            parsed_hkls = []
+            for row in enhanced:
+                hkl_str = row["(hkl) plane"]
+                if hkl_str and hkl_str != "—":
+                    try:
+                        hkl = tuple(int(x) for x in hkl_str.strip("()[]").split(","))
+                        if len(hkl) == 3:
+                            label = f"({hkl[0]} {hkl[1]} {hkl[2]})  •  d = {row['d-spacing (Å)']} Å"
+                            plane_options.append(label)
+                            parsed_hkls.append(hkl)
+                    except Exception:
+                        continue
+
+            if plane_options:
+                st.markdown("**Visualize matched plane in 3D**")
+                selected_label = st.selectbox(
+                    "Choose a plane from your matched peaks:",
+                    options=plane_options,
+                    key="plane_selector"
+                )
+
+                if st.button("Show Selected Plane in 3D Viewer", key="show_selected_plane"):
+                    try:
+                        sel_idx = plane_options.index(selected_label)
+                        h, k, l = parsed_hkls[sel_idx]
+
+                        plane_points = get_unit_cell_plane_points(h, k, l, lattice)
+
+                        if len(plane_points) >= 3:
+                            fig_plane = create_crystal_3d_plot(
+                                struct, title=f"{struct.composition.reduced_formula} + ({h} {k} {l}) plane"
+                            )
+                            x_p = [p[0] for p in plane_points]
+                            y_p = [p[1] for p in plane_points]
+                            z_p = [p[2] for p in plane_points]
+                            fig_plane.add_trace(go.Mesh3d(
+                                x=x_p, y=y_p, z=z_p,
+                                color="rgba(255, 165, 0, 0.5)",
+                                opacity=0.6,
+                                name=f"({h} {k} {l})",
+                                showlegend=True
+                            ))
+                            st.plotly_chart(fig_plane, use_container_width=True)
+                            st.success(f"Showing the ({h} {k} {l}) plane corresponding to the selected matched peak.")
+                        else:
+                            st.warning("This plane does not intersect the unit cell well.")
+                    except Exception as draw_err:
+                        st.error(f"Could not draw the plane: {draw_err}")
+        else:
+            st.caption("No (hkl) details available at current tolerance.")
 
 # ====================== STANDALONE CRYSTAL STRUCTURE VIEWER ======================
 st.divider()
@@ -1061,7 +1287,7 @@ st.header("🧊 Crystal Structure Viewer")
 
 st.markdown("""
 Upload a `.cif` file to visualize any crystal structure in 3D.  
-This works independently of the Materials Project phase identification.
+This works independently of the phase identification databases (COD / Materials Project).
 """)
 
 cif_file = st.file_uploader("Upload CIF file", type=["cif"], key="cif_viewer")
@@ -1176,7 +1402,7 @@ if cif_file is not None:
         st.error(f"Failed to read CIF file: {e}")
         st.info("Make sure the file is a valid CIF format.")
 
-st.caption("Built with ❤️ for researchers • Streamlit + pybaselines + Plotly + pymatgen • Feedback welcome!")
+st.caption("Built with ❤️ for researchers • Streamlit + pybaselines + Plotly + pymatgen + COD / AFLOW / Materials Project • Feedback welcome!")
 
 
 # ====================== PEAK BROADENING ANALYSIS ======================
