@@ -581,42 +581,63 @@ y_corrected = y_proc - baseline
 
 # Determine height threshold
 if height_mode == "% of max intensity":
-    height_threshold = (height_pct / 100.0) * np.max(y_corrected)
+    height_threshold = (height_pct / 100.0) * np.max(y_corrected) if len(y_corrected) > 0 else 0.0
 else:
     height_threshold = height_abs
 
+# Convert angular parameters (degrees) → sample index units
+# Guard against very fine step sizes that would make distance < 1
+dx = np.mean(np.diff(x)) if len(x) > 1 else 1.0
+if not np.isfinite(dx) or dx <= 0:
+    dx = 1.0
+
+distance_samples = max(1, int(round(min_distance / dx)))
+width_samples = max(1.0, min_width / dx)
+
 # Find peaks
+peaks = np.array([], dtype=int)
+properties = {}
+
 try:
     peaks, properties = find_peaks(
         y_corrected,
         height=height_threshold,
         prominence=prominence,
-        distance=min_distance / np.mean(np.diff(x)),  # convert degrees to index distance
-        width=min_width / np.mean(np.diff(x))
+        distance=distance_samples,
+        width=width_samples
     )
 except Exception as e:
     st.error(f"Peak detection failed: {e}")
-    peaks = np.array([])
+    peaks = np.array([], dtype=int)
+    properties = {}
 
-# Calculate d-spacing
-theta_rad = np.deg2rad(x[peaks] / 2.0)
-d_spacing = wavelength / (2 * np.sin(theta_rad)) if len(peaks) > 0 else np.array([])
+# Calculate d-spacing only when we have valid peaks
+if len(peaks) > 0:
+    theta_rad = np.deg2rad(x[peaks] / 2.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        d_spacing = wavelength / (2.0 * np.sin(theta_rad))
+        d_spacing = np.where(np.isfinite(d_spacing), d_spacing, np.nan)
+else:
+    d_spacing = np.array([])
 
 # Build peaks dataframe
-if len(peaks) > 0:
+if len(peaks) > 0 and properties:
     peak_data = {
         "2θ (°)": np.round(x[peaks], 4),
         "d-spacing (Å)": np.round(d_spacing, 4),
         "Intensity (corr.)": np.round(y_corrected[peaks], 1),
         "Intensity (raw)": np.round(y[peaks], 1),
-        "Prominence": np.round(properties["prominences"], 2),
-        "Width (°)": np.round(properties["widths"] * np.mean(np.diff(x)), 3),
-        "Height": np.round(properties["peak_heights"], 1),
+        "Prominence": np.round(properties.get("prominences", np.zeros(len(peaks))), 2),
+        "Width (°)": np.round(properties.get("widths", np.zeros(len(peaks))) * dx, 3),
+        "Height": np.round(properties.get("peak_heights", np.zeros(len(peaks))), 1),
     }
     peaks_df = pd.DataFrame(peak_data)
     peaks_df = peaks_df.sort_values("2θ (°)").reset_index(drop=True)
 else:
-    peaks_df = pd.DataFrame(columns=["2θ (°)", "d-spacing (Å)", "Intensity (corr.)", "Intensity (raw)", "Prominence", "Width (°)", "Height"])
+    peaks_df = pd.DataFrame(columns=[
+        "2θ (°)", "d-spacing (Å)", "Intensity (corr.)", "Intensity (raw)",
+        "Prominence", "Width (°)", "Height"
+    ])
 
 # ====================== PLOTTING ======================
 
@@ -1535,9 +1556,9 @@ Analyze **crystallite size** and **microstrain** from peak broadening.
 - Instrumental broadening (subtracted first)
 """)
 
-if len(peaks) > 0:
+if len(peaks) > 0 and properties:
     # Calculate FWHM from scipy find_peaks properties (in degrees 2θ)
-    x_spacing = np.mean(np.diff(x))
+    x_spacing = dx if 'dx' in dir() else (np.mean(np.diff(x)) if len(x) > 1 else 0.02)
     fwhm_deg = properties.get("widths", np.zeros(len(peaks))) * x_spacing
 
     # Create broadening dataframe
