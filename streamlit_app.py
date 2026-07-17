@@ -1,287 +1,4 @@
-#!/usr/bin/env python3
-"""
-XRD Data Analyzer
-=================
-A Streamlit web app for baseline correction and 2θ peak detection/measurement 
-on powder X-ray diffraction (XRD) data.
-
-Features:
-- Upload common XRD export files (CSV, TXT, DAT, XY, XLSX)
-- Robust parsing with options for headers, delimiters, column selection
-- Multiple baseline correction methods (via pybaselines)
-- Smoothing (Savitzky-Golay)
-- Interactive peak detection with adjustable parameters
-- Automatic d-spacing calculation (user-selectable wavelength)
-- Interactive Plotly plots (raw, baseline, corrected, peaks)
-- Export processed data and peak list as CSV
-- Demo data generator for testing
-
-Installation (run once):
-    pip install streamlit pandas numpy scipy plotly pybaselines pymatgen mp-api requests aflow
-
-Run:
-    streamlit run xrd_analyzer.py
-
-Author: Grok-assisted development for scientific use
-"""
-
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from scipy.signal import find_peaks, savgol_filter, detrend
-from scipy.sparse import diags
-from scipy.sparse.linalg import spsolve
-import io
-import warnings
-warnings.filterwarnings("ignore")
-
-# Try to import pybaselines (recommended for high-quality baseline methods)
-try:
-    from pybaselines import Baseline
-    HAS_PYBASELINES = True
-except ImportError:
-    HAS_PYBASELINES = False
-
-
-# ====================== 3D CRYSTAL VISUALIZATION (Plotly) ======================
-ELEMENT_COLORS = {
-    'H': '#FFFFFF', 'He': '#D9FFFF', 'Li': '#CC80FF', 'Be': '#C2FF00',
-    'B': '#FFB5B5', 'C': '#909090', 'N': '#3050F8', 'O': '#FF0D0D',
-    'F': '#90E050', 'Ne': '#B3E3F5', 'Na': '#AB5CF2', 'Mg': '#8AFF00',
-    'Al': '#BFA6A6', 'Si': '#F0C8A0', 'P': '#FF8000', 'S': '#FFFF30',
-    'Cl': '#1FF01F', 'Ar': '#80D1E3', 'K': '#8F40D4', 'Ca': '#3DFF00',
-    'Sc': '#E6E6E6', 'Ti': '#BFC2C7', 'V': '#A6A6AB', 'Cr': '#8A99C7',
-    'Mn': '#9C7AC7', 'Fe': '#E06633', 'Co': '#F090A0', 'Ni': '#50D050',
-    'Cu': '#C88033', 'Zn': '#7D80B0', 'Ga': '#C28F8F', 'Ge': '#668F8F',
-    'As': '#BD80E3', 'Se': '#FFA100', 'Br': '#A62929', 'Kr': '#5CB8D1',
-    'Rb': '#702EB0', 'Sr': '#00FF00', 'Y': '#94FFFF', 'Zr': '#94E0E0',
-    'Nb': '#73C2C9', 'Mo': '#54B5B5', 'Tc': '#3B9E9E', 'Ru': '#248F8F',
-    'Rh': '#0A7D8C', 'Pd': '#006985', 'Ag': '#C0C0C0', 'Cd': '#FFD98F',
-    'In': '#A67573', 'Sn': '#668080', 'Sb': '#9E63B5', 'Te': '#D47A00',
-    'I': '#940094', 'Xe': '#429EB2', 'Cs': '#57178F', 'Ba': '#00C900',
-    'La': '#70D4FF', 'Ce': '#FFFFC7', 'Pr': '#D9FFC7', 'Nd': '#C7FFC7',
-    'Pm': '#A3FFC7', 'Sm': '#8FFFC7', 'Eu': '#61FFC7', 'Gd': '#45FFC7',
-    'Tb': '#30FFC7', 'Dy': '#1FFFC7', 'Ho': '#00FF9C', 'Er': '#00E675',
-    'Tm': '#00D452', 'Yb': '#00BF38', 'Lu': '#00AB24', 'Hf': '#4DC2FF',
-    'Ta': '#4DA6FF', 'W': '#2194D6', 'Re': '#267DAB', 'Os': '#266696',
-    'Ir': '#175487', 'Pt': '#D0D0E0', 'Au': '#FFD123', 'Hg': '#B8B8D0',
-    'Tl': '#A6544D', 'Pb': '#575961', 'Bi': '#9E4FB5', 'Po': '#AB5C00',
-    'At': '#754F45', 'Rn': '#428296', 'Fr': '#420066', 'Ra': '#007D00',
-    'Ac': '#70ABFA', 'Th': '#00BAFF', 'Pa': '#00A1FF', 'U': '#008FFF',
-    'Np': '#0080FF', 'Pu': '#006BFF', 'Am': '#545CF2', 'Cm': '#785CE3',
-    'Bk': '#8A4FE3', 'Cf': '#A136D4', 'Es': '#B31FD4', 'Fm': '#B31FBA',
-}
-
-def get_element_color(element):
-    return ELEMENT_COLORS.get(element, '#CCCCCC')  # Default gray
-
-
-def create_crystal_3d_plot(structure, title="Crystal Structure"):
-    """Create an interactive 3D Plotly visualization of a pymatgen Structure."""
-    if structure is None:
-        return None
-
-    # Get fractional coordinates and convert to cartesian
-    coords = structure.cart_coords
-    elements = [site.specie.symbol for site in structure]
-
-    # Group by element for legend
-    from collections import defaultdict
-    element_groups = defaultdict(list)
-
-    for i, (coord, elem) in enumerate(zip(coords, elements)):
-        element_groups[elem].append(coord)
-
-    fig = go.Figure()
-
-    for elem, positions in element_groups.items():
-        x, y, z = zip(*positions)
-        fig.add_trace(go.Scatter3d(
-            x=x, y=y, z=z,
-            mode='markers',
-            marker=dict(
-                size=8,
-                color=get_element_color(elem),
-                line=dict(width=0.5, color='black')
-            ),
-            name=elem,
-            legendgroup=elem,
-            showlegend=True,
-            hovertemplate=f"<b>{elem}</b><br>x: %{{x:.2f}}<br>y: %{{y:.2f}}<br>z: %{{z:.2f}}<extra></extra>"
-        ))
-
-    # Add unit cell edges (simple box)
-    cell = structure.lattice.matrix
-    origin = np.array([0, 0, 0])
-    vertices = [
-        origin,
-        cell[0],
-        cell[1],
-        cell[2],
-        cell[0] + cell[1],
-        cell[0] + cell[2],
-        cell[1] + cell[2],
-        cell[0] + cell[1] + cell[2]
-    ]
-    edges = [
-        (0,1), (0,2), (0,3),
-        (1,4), (1,5), (2,4), (2,6), (3,5), (3,6),
-        (4,7), (5,7), (6,7)
-    ]
-
-    for start, end in edges:
-        fig.add_trace(go.Scatter3d(
-            x=[vertices[start][0], vertices[end][0]],
-            y=[vertices[start][1], vertices[end][1]],
-            z=[vertices[start][2], vertices[end][2]],
-            mode='lines',
-            line=dict(color='black', width=2),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
-
-    fig.update_layout(
-        title=title,
-        scene=dict(
-            xaxis_title='X (Å)',
-            yaxis_title='Y (Å)',
-            zaxis_title='Z (Å)',
-            aspectmode='data'
-        ),
-        legend_title_text="Elements",
-        height=550,
-        margin=dict(l=0, r=0, b=0, t=40)
-    )
-
-    return fig
-
-
-# ====================== STREAMLIT APP ======================
-
-st.set_page_config(
-    page_title="XRD Peak Analyzer",
-    page_icon="🧪",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS for nicer look
-st.markdown("""
-<style>
-    .main .block-container { padding-top: 1rem; }
-    .stMetric { background-color: #f0f2f6; border-radius: 8px; padding: 8px; }
-    .peak-table { font-size: 0.9rem; }
-</style>
-""", unsafe_allow_html=True)
-
-st.title("🧪 XRD Data Analyzer")
-st.caption("**Measure 2θ values • Baseline correction • Peak detection** for powder XRD patterns")
-
-# ====================== SIDEBAR CONTROLS ======================
-with st.sidebar:
-    st.header("⚙️ Controls")
-    
-    # File upload
-    uploaded_file = st.file_uploader(
-        "Upload XRD data file",
-        type=["csv", "txt", "dat", "xy", "xlsx", "xls"],
-        help="Common formats from Bruker, Rigaku, PANalytical, etc. Export as ASCII/CSV if possible."
-    )
-    
-    st.divider()
-    
-    # Demo data
-    if st.button("📊 Load Demo XRD Data", use_container_width=True):
-        st.session_state["use_demo"] = True
-        st.rerun()
-    
-    if st.button("🔄 Reset App", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
-    
-    st.divider()
-    
-    # Advanced file parsing
-    with st.expander("📁 File Parsing Options", expanded=False):
-        skip_rows = st.number_input("Skip first N rows (header/metadata)", min_value=0, max_value=50, value=0, step=1)
-        delimiter = st.selectbox(
-            "Delimiter",
-            options=["Auto (recommended)", "Comma (,)", "Tab (\\t)", "Semicolon (;)", "Space", "Pipe (|)"],
-            index=0
-        )
-        header_option = st.selectbox(
-            "Header row",
-            options=["Infer from file", "No header (use column names below)", "First row is header"],
-            index=0
-        )
-    
-    st.divider()
-    
-    # Preprocessing
-    st.subheader("Preprocessing")
-    
-    do_smoothing = st.checkbox("Apply Savitzky-Golay smoothing", value=True)
-    if do_smoothing:
-        sg_window = st.slider("Smoothing window length (odd)", min_value=5, max_value=101, value=21, step=2)
-        sg_poly = st.slider("Polynomial order", min_value=1, max_value=5, value=3)
-    
-    st.divider()
-    
-    # Baseline correction
-    st.subheader("Baseline Correction")
-    
-    if HAS_PYBASELINES:
-        baseline_method = st.selectbox(
-            "Method (pybaselines)",
-            options=[
-                "als (Asymmetric Least Squares)",
-                "arpls (Asymmetrically Reweighted PLS)",
-                "polynomial",
-                "modpoly (Modified Polynomial)",
-                "imodpoly (Improved Modified Poly)",
-                "rubberband",
-                "None (no correction)"
-            ],
-            index=0,
-            help="ALS and ARPLS are excellent for curved/sloping XRD backgrounds. Polynomial methods good for gentle curves."
-        )
-    else:
-        st.warning("⚠️ pybaselines not installed. Using built-in ALS only.\n\nInstall with: `pip install pybaselines` for more methods.")
-        baseline_method = st.selectbox(
-            "Method",
-            options=["als (built-in)", "linear detrend", "None"],
-            index=0
-        )
-    
-    # Method-specific parameters
-    if "als" in baseline_method.lower():
-        lam = st.number_input("λ (smoothness, higher = smoother baseline)", value=1e5, min_value=1e2, max_value=1e9, step=1e4, format="%.0e")
-        p = st.slider("p (asymmetry, lower = more baseline below data)", min_value=0.001, max_value=0.5, value=0.01, step=0.001, format="%.3f")
-        niter = st.slider("Iterations", min_value=5, max_value=30, value=10)
-    elif "arpls" in baseline_method.lower() and HAS_PYBASELINES:
-        lam = st.number_input("λ (smoothness)", value=1e5, min_value=1e2, max_value=1e9, step=1e4, format="%.0e")
-    elif "poly" in baseline_method.lower() or "rubberband" in baseline_method.lower():
-        poly_degree = st.slider("Polynomial degree", min_value=1, max_value=8, value=4)
-    
-    st.divider()
-    
-    # Peak detection
-    st.subheader("Peak Detection")
-    
-    height_mode = st.radio("Height threshold type", ["Absolute", "% of max intensity"], horizontal=True, index=1)
-    
-    if height_mode == "% of max intensity":
-        height_pct = st.slider("Min peak height (% of max)", min_value=0.5, max_value=50.0, value=5.0, step=0.5)
-    else:
-        height_abs = st.number_input("Min peak height (absolute)", value=100.0, min_value=0.0)
-    
-    prominence = st.slider("Prominence (peak distinctness)", min_value=0.1, max_value=100.0, value=10.0, step=0.5,
-                           help="Higher = only sharp, prominent peaks. Lower = more peaks including shoulders.")
-    min_distance = st.slider("Min distance between peaks (degrees 2θ)", min_value=0.05, max_value=5.0, value=0.3, step=0.05)
-    min_width = st.slider("Min peak width (degrees 2θ)", min_value=0.01, max_value=2.0, value=0.1, step=0.01)
+in peak width (degrees 2θ)", min_value=0.01, max_value=2.0, value=0.1, step=0.01)
     
     st.divider()
     
@@ -469,8 +186,25 @@ elif HAS_PYBASELINES:
     try:
         if method_key == "als":
             baseline, _ = baseline_obj.asls(y_proc, lam=lam, p=p, max_iter=niter)
+        elif method_key == "airpls":
+            baseline, _ = baseline_obj.airpls(y_proc, lam=lam, max_iter=niter)
         elif method_key == "arpls":
             baseline, _ = baseline_obj.arpls(y_proc, lam=lam)
+        elif method_key == "aspls":
+            baseline, _ = baseline_obj.aspls(y_proc, lam=lam)
+        elif method_key == "drpls":
+            baseline, _ = baseline_obj.drpls(y_proc, lam=lam)
+        elif method_key == "iasls":
+            baseline, _ = baseline_obj.iasls(y_proc, lam=lam, p=p, max_iter=niter)
+        elif method_key == "snip":
+            baseline, _ = baseline_obj.snip(
+                y_proc,
+                max_half_window=snip_half_window,
+                decreasing=snip_decreasing,
+                smooth_half_window=snip_smooth if snip_smooth > 0 else None
+            )
+        elif method_key == "rolling_ball":
+            baseline, _ = baseline_obj.rolling_ball(y_proc, half_window=ball_hw)
         elif method_key == "polynomial":
             baseline, _ = baseline_obj.polynomial(y_proc, poly_order=poly_degree)
         elif method_key == "modpoly":
@@ -721,9 +455,11 @@ with col_right:
 with st.expander("💡 Tips for Best Results & Common Issues", expanded=False):
     st.markdown("""
     **Baseline Correction:**
-    - **ALS / ARPLS**: Best for most XRD patterns with curved or sloping backgrounds. Increase λ for smoother baseline; decrease p if baseline is being pulled up into peaks.
-    - **Polynomial / modpoly**: Good when background is gently curved. Higher degree = more flexible but can overfit.
-    - **Rubberband**: Connects local minima — useful for very spiky data.
+    - **ALS / airPLS / ARPLS / asPLS / drPLS**: Excellent for most powder XRD patterns with curved or sloping backgrounds. Increase λ for a smoother baseline; decrease *p* (when available) if the baseline is being pulled up into the peaks.
+    - **SNIP**: Classic algorithm widely used in XRD/XRF software. Very effective for removing broad backgrounds while preserving peaks. Adjust the half-window size to match your peak widths.
+    - **Rolling ball**: Simple morphological method. Robust and fast; good starting point when other methods overfit.
+    - **Polynomial / modpoly / imodpoly**: Good when the background is gently curved. Higher degree = more flexible but can overfit peaks.
+    - **Rubberband**: Connects local minima — useful for very spiky or noisy data.
     
     **Peak Detection:**
     - Start with **prominence ~ 5-15** and **height ~ 3-10%** of max.
@@ -781,15 +517,15 @@ col1, col2 = st.columns([2, 1])
 with col1:
     if "COD" in db_choice:
         search_query = st.text_input(
-            "Chemical formula or elements (comma-separated)",
+            "Chemical formula or elements",
             value="Fe2O3",
-            help="For COD: prefer a formula like Fe2O3 or CaCO3. You can also list elements (e.g. Fe, O)."
+            help="Formula (Fe2O3, CaCO3) or elements. Commas or spaces both work: Fe, O  or  Fe O  or  Fe,O"
         )
     else:
         search_query = st.text_input(
-            "Elements in your sample (comma-separated)",
+            "Elements in your sample",
             value="Fe, O",
-            help="Example: Fe, O   or   Ca, C, O   or   Ti, O"
+            help="Separate elements with commas or spaces. Examples: Fe, O   |   Fe O   |   Ca, C, O   |   Ti,O"
         )
 with col2:
     max_cands = st.slider("Max candidates", min_value=5, max_value=30, value=12, step=1)
@@ -1006,7 +742,8 @@ elif "Materials Project" in db_choice and HAS_PYMATGEN:
 
             if st.button("🔍 Search Materials Project Database", type="primary", use_container_width=True):
                 try:
-                    elements = [e.strip() for e in search_query.split(",") if e.strip()]
+                    # Accept commas or spaces between elements
+                    elements = [e.strip() for e in search_query.replace(",", " ").split() if e.strip()]
                     with MPRester(mp_api_key) as mpr:
                         docs = mpr.materials.summary.search(
                             elements=elements,
@@ -1040,9 +777,41 @@ if "phase_candidates" in st.session_state and st.session_state["phase_candidates
     candidates = st.session_state["phase_candidates"]
     db_used = st.session_state.get("phase_db", "Unknown")
 
-    # Display table
+    st.subheader(f"Candidates from {db_used} ({len(candidates)} found)")
+
+    # --- Search / filter within the structure list ---
+    filter_text = st.text_input(
+        "🔍 Filter structures (type formula, elements, space group, or ID)",
+        value="",
+        placeholder="e.g. Fe2O3   or   Fe, O   or   R-3c   or   cod-901",
+        help="Filters the list below in real time. Commas or spaces between elements both work (Fe, O or Fe O)."
+    )
+
+    def _matches_filter(c, query: str) -> bool:
+        if not query or not query.strip():
+            return True
+        q = query.lower().strip()
+        # Allow commas or spaces as separators
+        tokens = [t.strip() for t in q.replace(",", " ").split() if t.strip()]
+        searchable = " ".join([
+            str(c.get("id", "")),
+            str(c.get("formula", "")),
+            str(c.get("sg", "")),
+            str(c.get("crystal_system", "")),
+        ]).lower()
+        # Every token must appear somewhere
+        return all(tok in searchable for tok in tokens)
+
+    filtered = [c for c in candidates if _matches_filter(c, filter_text)]
+
+    if filter_text.strip() and not filtered:
+        st.warning(f"No structures match “{filter_text}”. Clear the filter or try different terms.")
+    elif filter_text.strip():
+        st.caption(f"Showing {len(filtered)} of {len(candidates)} structures")
+
+    # Display filtered table
     cand_rows = []
-    for c in candidates:
+    for c in filtered:
         row = {
             "ID": c["id"],
             "Formula": c["formula"],
@@ -1055,13 +824,25 @@ if "phase_candidates" in st.session_state and st.session_state["phase_candidates
             row["Density"] = c["density"]
         cand_rows.append(row)
 
-    st.dataframe(pd.DataFrame(cand_rows), use_container_width=True, hide_index=True, height=220)
+    if cand_rows:
+        st.dataframe(
+            pd.DataFrame(cand_rows),
+            use_container_width=True,
+            hide_index=True,
+            height=min(300, 45 + 32 * len(cand_rows))
+        )
+    else:
+        st.info("No candidates to display.")
 
-    selected_id = st.selectbox(
-        "Choose a structure to simulate its XRD pattern and match against your peaks",
-        options=[c["id"] for c in candidates],
-        format_func=lambda x: f"{x} — {next((c['formula'] for c in candidates if c['id']==x), '')}"
-    )
+    # Selectbox only over the filtered list
+    if filtered:
+        selected_id = st.selectbox(
+            "Choose a structure to simulate its XRD pattern and match against your peaks",
+            options=[c["id"] for c in filtered],
+            format_func=lambda x: f"{x} — {next((c['formula'] for c in filtered if c['id']==x), '')}"
+        )
+    else:
+        selected_id = None
 
     tolerance = st.slider(
         "2θ matching tolerance (°)",
@@ -1069,9 +850,9 @@ if "phase_candidates" in st.session_state and st.session_state["phase_candidates
         help="How close a theoretical peak must be to an experimental one to count as a match."
     )
 
-    if st.button("📐 Simulate Pattern & Calculate Match Score", use_container_width=True):
+    if selected_id and st.button("📐 Simulate Pattern & Calculate Match Score", use_container_width=True):
         try:
-            # Retrieve the Structure object
+            # Retrieve the Structure object (search in full list to be safe)
             selected = next(c for c in candidates if c["id"] == selected_id)
 
             if selected["source"] in ("COD", "AFLOW"):
