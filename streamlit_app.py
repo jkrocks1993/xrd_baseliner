@@ -85,13 +85,25 @@ def create_crystal_3d_plot(structure, title="Crystal Structure"):
 
     # Get fractional coordinates and convert to cartesian
     coords = structure.cart_coords
-    elements = [site.specie.symbol for site in structure]
+
+    # Robust element extraction (works across pymatgen versions)
+    elements = []
+    for site in structure:
+        try:
+            # Modern preferred API
+            elements.append(site.species.elements[0].symbol)
+        except Exception:
+            try:
+                # Legacy attribute (older pymatgen)
+                elements.append(site.specie.symbol)
+            except Exception:
+                elements.append("X")  # fallback
 
     # Group by element for legend
     from collections import defaultdict
     element_groups = defaultdict(list)
 
-    for i, (coord, elem) in enumerate(zip(coords, elements)):
+    for coord, elem in zip(coords, elements):
         element_groups[elem].append(coord)
 
     fig = go.Figure()
