@@ -1,4 +1,328 @@
-in peak width (degrees 2θ)", min_value=0.01, max_value=2.0, value=0.1, step=0.01)
+#!/usr/bin/env python3
+"""
+XRD Data Analyzer
+=================
+A Streamlit web app for baseline correction and 2θ peak detection/measurement 
+on powder X-ray diffraction (XRD) data.
+
+Features:
+- Upload common XRD export files (CSV, TXT, DAT, XY, XLSX)
+- Robust parsing with options for headers, delimiters, column selection
+- Multiple baseline correction methods (via pybaselines)
+- Smoothing (Savitzky-Golay)
+- Interactive peak detection with adjustable parameters
+- Automatic d-spacing calculation (user-selectable wavelength)
+- Interactive Plotly plots (raw, baseline, corrected, peaks)
+- Export processed data and peak list as CSV
+- Demo data generator for testing
+
+Installation (run once):
+    pip install -r requirements.txt
+
+Run:
+    streamlit run xrd_analyzer.py
+
+Author: Grok-assisted development for scientific use
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from scipy.signal import find_peaks, savgol_filter, detrend
+from scipy.sparse import diags
+from scipy.sparse.linalg import spsolve
+import io
+import warnings
+warnings.filterwarnings("ignore")
+
+# Try to import pybaselines (recommended for high-quality baseline methods)
+try:
+    from pybaselines import Baseline
+    HAS_PYBASELINES = True
+except ImportError:
+    HAS_PYBASELINES = False
+
+
+# ====================== 3D CRYSTAL VISUALIZATION (Plotly) ======================
+ELEMENT_COLORS = {
+    'H': '#FFFFFF', 'He': '#D9FFFF', 'Li': '#CC80FF', 'Be': '#C2FF00',
+    'B': '#FFB5B5', 'C': '#909090', 'N': '#3050F8', 'O': '#FF0D0D',
+    'F': '#90E050', 'Ne': '#B3E3F5', 'Na': '#AB5CF2', 'Mg': '#8AFF00',
+    'Al': '#BFA6A6', 'Si': '#F0C8A0', 'P': '#FF8000', 'S': '#FFFF30',
+    'Cl': '#1FF01F', 'Ar': '#80D1E3', 'K': '#8F40D4', 'Ca': '#3DFF00',
+    'Sc': '#E6E6E6', 'Ti': '#BFC2C7', 'V': '#A6A6AB', 'Cr': '#8A99C7',
+    'Mn': '#9C7AC7', 'Fe': '#E06633', 'Co': '#F090A0', 'Ni': '#50D050',
+    'Cu': '#C88033', 'Zn': '#7D80B0', 'Ga': '#C28F8F', 'Ge': '#668F8F',
+    'As': '#BD80E3', 'Se': '#FFA100', 'Br': '#A62929', 'Kr': '#5CB8D1',
+    'Rb': '#702EB0', 'Sr': '#00FF00', 'Y': '#94FFFF', 'Zr': '#94E0E0',
+    'Nb': '#73C2C9', 'Mo': '#54B5B5', 'Tc': '#3B9E9E', 'Ru': '#248F8F',
+    'Rh': '#0A7D8C', 'Pd': '#006985', 'Ag': '#C0C0C0', 'Cd': '#FFD98F',
+    'In': '#A67573', 'Sn': '#668080', 'Sb': '#9E63B5', 'Te': '#D47A00',
+    'I': '#940094', 'Xe': '#429EB2', 'Cs': '#57178F', 'Ba': '#00C900',
+    'La': '#70D4FF', 'Ce': '#FFFFC7', 'Pr': '#D9FFC7', 'Nd': '#C7FFC7',
+    'Pm': '#A3FFC7', 'Sm': '#8FFFC7', 'Eu': '#61FFC7', 'Gd': '#45FFC7',
+    'Tb': '#30FFC7', 'Dy': '#1FFFC7', 'Ho': '#00FF9C', 'Er': '#00E675',
+    'Tm': '#00D452', 'Yb': '#00BF38', 'Lu': '#00AB24', 'Hf': '#4DC2FF',
+    'Ta': '#4DA6FF', 'W': '#2194D6', 'Re': '#267DAB', 'Os': '#266696',
+    'Ir': '#175487', 'Pt': '#D0D0E0', 'Au': '#FFD123', 'Hg': '#B8B8D0',
+    'Tl': '#A6544D', 'Pb': '#575961', 'Bi': '#9E4FB5', 'Po': '#AB5C00',
+    'At': '#754F45', 'Rn': '#428296', 'Fr': '#420066', 'Ra': '#007D00',
+    'Ac': '#70ABFA', 'Th': '#00BAFF', 'Pa': '#00A1FF', 'U': '#008FFF',
+    'Np': '#0080FF', 'Pu': '#006BFF', 'Am': '#545CF2', 'Cm': '#785CE3',
+    'Bk': '#8A4FE3', 'Cf': '#A136D4', 'Es': '#B31FD4', 'Fm': '#B31FBA',
+}
+
+def get_element_color(element):
+    return ELEMENT_COLORS.get(element, '#CCCCCC')  # Default gray
+
+
+def create_crystal_3d_plot(structure, title="Crystal Structure"):
+    """Create an interactive 3D Plotly visualization of a pymatgen Structure."""
+    if structure is None:
+        return None
+
+    # Get fractional coordinates and convert to cartesian
+    coords = structure.cart_coords
+    elements = [site.specie.symbol for site in structure]
+
+    # Group by element for legend
+    from collections import defaultdict
+    element_groups = defaultdict(list)
+
+    for i, (coord, elem) in enumerate(zip(coords, elements)):
+        element_groups[elem].append(coord)
+
+    fig = go.Figure()
+
+    for elem, positions in element_groups.items():
+        x, y, z = zip(*positions)
+        fig.add_trace(go.Scatter3d(
+            x=x, y=y, z=z,
+            mode='markers',
+            marker=dict(
+                size=8,
+                color=get_element_color(elem),
+                line=dict(width=0.5, color='black')
+            ),
+            name=elem,
+            legendgroup=elem,
+            showlegend=True,
+            hovertemplate=f"<b>{elem}</b><br>x: %{{x:.2f}}<br>y: %{{y:.2f}}<br>z: %{{z:.2f}}<extra></extra>"
+        ))
+
+    # Add unit cell edges (simple box)
+    cell = structure.lattice.matrix
+    origin = np.array([0, 0, 0])
+    vertices = [
+        origin,
+        cell[0],
+        cell[1],
+        cell[2],
+        cell[0] + cell[1],
+        cell[0] + cell[2],
+        cell[1] + cell[2],
+        cell[0] + cell[1] + cell[2]
+    ]
+    edges = [
+        (0,1), (0,2), (0,3),
+        (1,4), (1,5), (2,4), (2,6), (3,5), (3,6),
+        (4,7), (5,7), (6,7)
+    ]
+
+    for start, end in edges:
+        fig.add_trace(go.Scatter3d(
+            x=[vertices[start][0], vertices[end][0]],
+            y=[vertices[start][1], vertices[end][1]],
+            z=[vertices[start][2], vertices[end][2]],
+            mode='lines',
+            line=dict(color='black', width=2),
+            showlegend=False,
+            hoverinfo='skip'
+        ))
+
+    fig.update_layout(
+        title=title,
+        scene=dict(
+            xaxis_title='X (Å)',
+            yaxis_title='Y (Å)',
+            zaxis_title='Z (Å)',
+            aspectmode='data'
+        ),
+        legend_title_text="Elements",
+        height=550,
+        margin=dict(l=0, r=0, b=0, t=40)
+    )
+
+    return fig
+
+
+# ====================== STREAMLIT APP ======================
+
+st.set_page_config(
+    page_title="XRD Peak Analyzer",
+    page_icon="🧪",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for nicer look
+st.markdown("""
+<style>
+    .main .block-container { padding-top: 1rem; }
+    .stMetric { background-color: #f0f2f6; border-radius: 8px; padding: 8px; }
+    .peak-table { font-size: 0.9rem; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🧪 XRD Data Analyzer")
+st.caption("**Measure 2θ values • Baseline correction • Peak detection** for powder XRD patterns")
+
+# ====================== SIDEBAR CONTROLS ======================
+with st.sidebar:
+    st.header("⚙️ Controls")
+    
+    # File upload
+    uploaded_file = st.file_uploader(
+        "Upload XRD data file",
+        type=["csv", "txt", "dat", "xy", "xlsx", "xls"],
+        help="Common formats from Bruker, Rigaku, PANalytical, etc. Export as ASCII/CSV if possible."
+    )
+    
+    st.divider()
+    
+    # Demo data
+    if st.button("📊 Load Demo XRD Data", use_container_width=True):
+        st.session_state["use_demo"] = True
+        st.rerun()
+    
+    if st.button("🔄 Reset App", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+    
+    st.divider()
+    
+    # Advanced file parsing
+    with st.expander("📁 File Parsing Options", expanded=False):
+        skip_rows = st.number_input("Skip first N rows (header/metadata)", min_value=0, max_value=50, value=0, step=1)
+        delimiter = st.selectbox(
+            "Delimiter",
+            options=["Auto (recommended)", "Comma (,)", "Tab (\\t)", "Semicolon (;)", "Space", "Pipe (|)"],
+            index=0
+        )
+        header_option = st.selectbox(
+            "Header row",
+            options=["Infer from file", "No header (use column names below)", "First row is header"],
+            index=0
+        )
+    
+    st.divider()
+    
+    # Preprocessing
+    st.subheader("Preprocessing")
+    
+    do_smoothing = st.checkbox("Apply Savitzky-Golay smoothing", value=True)
+    if do_smoothing:
+        sg_window = st.slider("Smoothing window length (odd)", min_value=5, max_value=101, value=21, step=2)
+        sg_poly = st.slider("Polynomial order", min_value=1, max_value=5, value=3)
+    
+    st.divider()
+    
+    # Baseline correction
+    st.subheader("Baseline Correction")
+    
+    if HAS_PYBASELINES:
+        baseline_method = st.selectbox(
+            "Method (pybaselines)",
+            options=[
+                "als (Asymmetric Least Squares)",
+                "airpls (Adaptive Iteratively Reweighted PLS)",
+                "arpls (Asymmetrically Reweighted PLS)",
+                "aspls (Adaptive Smoothness PLS)",
+                "drpls (Doubly Reweighted PLS)",
+                "iasls (Improved AsLS)",
+                "snip (Statistics-sensitive Non-linear Iterative Peak-clipping)",
+                "rolling_ball",
+                "polynomial",
+                "modpoly (Modified Polynomial)",
+                "imodpoly (Improved Modified Poly)",
+                "rubberband",
+                "None (no correction)"
+            ],
+            index=0,
+            help="ALS / airPLS / ARPLS / asPLS work well for curved XRD backgrounds. SNIP is a classic algorithm used in many XRD/XRF packages. Rolling ball is simple and robust. Polynomial methods suit gentle curves."
+        )
+    else:
+        st.warning("⚠️ pybaselines not installed. Using built-in ALS only.\n\nInstall with: `pip install pybaselines` for more methods.")
+        baseline_method = st.selectbox(
+            "Method",
+            options=["als (built-in)", "linear detrend", "None"],
+            index=0
+        )
+    
+    # Method-specific parameters
+    method_lower = baseline_method.lower()
+    
+    # Whittaker-style methods (need λ, sometimes p and iterations)
+    if any(k in method_lower for k in ["als", "airpls", "arpls", "aspls", "drpls", "iasls"]):
+        default_lam = 1e6 if "airpls" in method_lower else 1e5
+        lam = st.number_input(
+            "λ (smoothness, higher = smoother baseline)",
+            value=default_lam, min_value=1e2, max_value=1e10, step=1e4, format="%.0e",
+            help="Typical XRD range: 1e4 – 1e7. Increase if baseline is too wiggly."
+        )
+        if "als" in method_lower or "iasls" in method_lower:
+            p = st.slider(
+                "p (asymmetry, lower = more baseline below data)",
+                min_value=0.001, max_value=0.5, value=0.01, step=0.001, format="%.3f"
+            )
+        if any(k in method_lower for k in ["als", "airpls", "iasls"]):
+            niter = st.slider(
+                "Max iterations",
+                min_value=5, max_value=100,
+                value=50 if "airpls" in method_lower else 10
+            )
+    
+    # SNIP parameters
+    elif "snip" in method_lower:
+        snip_half_window = st.slider(
+            "Max half-window (iterations)",
+            min_value=5, max_value=200, value=40, step=1,
+            help="Controls how broad features can be. Start ~20–60 for typical powder XRD."
+        )
+        snip_decreasing = st.checkbox("Decreasing window order (usually smoother)", value=True)
+        snip_smooth = st.slider("Smoothing half-window (0 = off)", min_value=0, max_value=20, value=3)
+    
+    # Rolling ball
+    elif "rolling_ball" in method_lower:
+        ball_hw = st.slider(
+            "Half-window size",
+            min_value=3, max_value=150, value=30, step=1,
+            help="Related to the width of features you want to keep as peaks (not baseline)."
+        )
+    
+    # Polynomial family
+    elif any(k in method_lower for k in ["poly", "rubberband"]):
+        poly_degree = st.slider("Polynomial degree", min_value=1, max_value=12, value=4)
+    
+    st.divider()
+    
+    # Peak detection
+    st.subheader("Peak Detection")
+    
+    height_mode = st.radio("Height threshold type", ["Absolute", "% of max intensity"], horizontal=True, index=1)
+    
+    if height_mode == "% of max intensity":
+        height_pct = st.slider("Min peak height (% of max)", min_value=0.5, max_value=50.0, value=5.0, step=0.5)
+    else:
+        height_abs = st.number_input("Min peak height (absolute)", value=100.0, min_value=0.0)
+    
+    prominence = st.slider("Prominence (peak distinctness)", min_value=0.1, max_value=100.0, value=10.0, step=0.5,
+                           help="Higher = only sharp, prominent peaks. Lower = more peaks including shoulders.")
+    min_distance = st.slider("Min distance between peaks (degrees 2θ)", min_value=0.05, max_value=5.0, value=0.3, step=0.05)
+    min_width = st.slider("Min peak width (degrees 2θ)", min_value=0.01, max_value=2.0, value=0.1, step=0.01)
     
     st.divider()
     
